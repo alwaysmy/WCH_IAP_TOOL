@@ -1,0 +1,1 @@
+dotnet publish .\WCHIAPToolNew\WCHIAPToolNew.csproj -c Release
