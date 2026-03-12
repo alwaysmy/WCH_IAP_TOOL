@@ -24,7 +24,6 @@ WCH_IAP_TOOL/
 ├── CH375_CH372_lib/             # CH375驱动库
 │   ├── CH375DLL64.dll           # 64位驱动DLL
 │   └── CH375DLL64.lib           # 链接库
-├── CH32V305GBU6_IAP_RevA_0_1/   # 单片机IAP固件源码
 ├── WCHIAPToolCLI/               # CLI版本
 │   ├── Program.cs
 │   └── WCHIAPToolCLI.csproj
