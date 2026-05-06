@@ -189,3 +189,7 @@ FodyWeavers.xsd
 
 # Windows shortcuts
 *.lnk
+
+# IDE / Agent
+.codeartsdoer/
+.omc/
