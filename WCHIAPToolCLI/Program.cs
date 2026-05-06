@@ -481,15 +481,17 @@ class Program
     static List<UsbDeviceEntry> SearchDevices(ushort vidFilter, ushort pidFilter)
     {
         var devices = new List<UsbDeviceEntry>();
+        var invalidHandle = new IntPtr(-1);
 
         for (uint i = 0; i < 16; i++)
         {
+            IntPtr searchHandle = IntPtr.Zero;
             try
             {
-                IntPtr handle = CH375OpenDevice(i);
-                LogDebug($"CH375OpenDevice({i}) = 0x{handle.ToInt64():X8}");
+                searchHandle = CH375OpenDevice(i);
+                LogDebug($"CH375OpenDevice({i}) = 0x{searchHandle.ToInt64():X8}");
 
-                if (handle == IntPtr.Zero || handle.ToInt32() == -1)
+                if (searchHandle == IntPtr.Zero || searchHandle == invalidHandle)
                     continue;
 
                 uint usbId = CH375GetUsbID(i);
@@ -535,6 +537,11 @@ class Program
             catch (Exception ex)
             {
                 LogDebug($"Error checking device {i}: {ex.Message}");
+            }
+            finally
+            {
+                if (searchHandle != IntPtr.Zero && searchHandle != invalidHandle)
+                    CH375CloseDevice(i);
             }
         }
 
@@ -750,7 +757,7 @@ class Program
             ptr = Marshal.AllocHGlobal((int)len);
             try
             {
-                if (CH375ReadData(_selectedDeviceIndex, ptr, ref len))
+                if (CH375ReadData(_selectedDeviceIndex, ptr, ref len) && len > 0)
                 {
                     Marshal.Copy(ptr, resp, 0, (int)len);
                     LogDebug($"End response: 0x{resp[0]:X2}");
