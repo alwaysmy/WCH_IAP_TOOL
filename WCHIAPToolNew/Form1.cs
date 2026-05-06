@@ -43,6 +43,8 @@ namespace WCHIAPToolNew
 
         private List<DeviceInfo> devices = new List<DeviceInfo>();
         private uint selectedDeviceIndex = 0;
+        private System.Windows.Forms.Timer? _pollTimer;
+        private int _lastDeviceCount = 0;
 
         private const byte CMD_IAP_PROM = 0x80;
         private const byte CMD_IAP_ERASE = 0x81;
@@ -82,6 +84,35 @@ namespace WCHIAPToolNew
             CreateLogSection();
 
             SearchDevices();
+            StartDevicePolling();
+        }
+
+        private void StartDevicePolling()
+        {
+            // CH375 使用自定义驱动，WM_DEVICECHANGE 不可靠，
+            // 使用定时轮询检测设备插拔
+            _pollTimer = new System.Windows.Forms.Timer();
+            _pollTimer.Interval = 2000;
+            _pollTimer.Tick += (s, e) =>
+            {
+                int currentCount = 0;
+                for (uint i = 0; i < 16; i++)
+                {
+                    IntPtr h = CH375OpenDevice(i);
+                    bool valid = h != IntPtr.Zero && h.ToInt32() != -1;
+                    if (h != IntPtr.Zero && h.ToInt32() != -1)
+                        CH375CloseDevice(i);
+                    if (valid) currentCount++;
+                }
+
+                if (currentCount != _lastDeviceCount)
+                {
+                    LogDebug($"设备数量变化: {_lastDeviceCount} -> {currentCount}");
+                    _lastDeviceCount = currentCount;
+                    SearchDevices();
+                }
+            };
+            _pollTimer.Start();
         }
 
         private void CreateDeviceSection()
@@ -289,27 +320,20 @@ namespace WCHIAPToolNew
 
         protected override void WndProc(ref Message m)
         {
-            base.WndProc(ref m);
-
             if (m.Msg == WM_DEVICECHANGE)
             {
                 int eventType = m.WParam.ToInt32();
-                if (eventType == DBT_DEVICEARRIVAL)
+                if (eventType == DBT_DEVICEARRIVAL || eventType == DBT_DEVICEREMOVECOMPLETE ||
+                    eventType == DBT_DEVNODES_CHANGED)
                 {
-                    LogDebug("设备插入事件");
-                    SearchDevices();
-                }
-                else if (eventType == DBT_DEVICEREMOVECOMPLETE)
-                {
-                    LogDebug("设备移除事件");
-                    SearchDevices();
-                }
-                else if (eventType == DBT_DEVNODES_CHANGED)
-                {
-                    LogDebug("设备节点变化事件");
-                    SearchDevices();
+                    LogDebug($"WM_DEVICECHANGE: 0x{eventType:X4}");
+                    // 延迟搜索，等待 USB 栈完成设备枚举
+                    BeginInvoke(() => { SearchDevices(); });
+                    return;
                 }
             }
+
+            base.WndProc(ref m);
         }
 
         private void DeviceComboBox_SelectedIndexChanged(object sender, EventArgs e)
