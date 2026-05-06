@@ -502,9 +502,11 @@ class Program
 
                 LogDebug($"Raw: VID=0x{vendorId:X4}, PID=0x{productId:X4}, Name={deviceName}");
 
-                // Fallback: parse VID/PID from device name if CH375GetUsbID returns 0
+                // Fallback: parse VID/PID from device name.
+                // Device name is the authoritative source (raw USB path),
+                // because CH375GetUsbID may return swapped bytes on some DLL versions.
                 // Device name format: \\?\usb#vid_4348&pid_55e0#...
-                if ((vendorId == 0 || productId == 0) && !string.IsNullOrEmpty(deviceName))
+                if (!string.IsNullOrEmpty(deviceName))
                 {
                     var vidMatch = Regex.Match(deviceName,
                         @"vid_([0-9a-fA-F]{4})", RegexOptions.IgnoreCase);
