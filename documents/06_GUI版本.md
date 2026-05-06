@@ -88,13 +88,45 @@ GUI版本提供图形界面的IAP下载工具，具有以下特点：
 
 ### 5.1 检测机制
 
-GUI版本使用Windows消息机制实现自动检测：
+GUI 版本采用**三层检测**策略确保设备插拔及时响应：
+
+| 层 | 机制 | 说明 |
+|----|------|------|
+| 定时轮询 | 每 2 秒扫描设备数量，变化时刷新 | 主力，不漏任何变化 |
+| WM_DEVICECHANGE | Windows 消息触发 | 辅助，快速响应 |
+| BeginInvoke | 延迟到消息队列处理后执行 | 等待 USB 栈枚举完成 |
+
+代码实现：
 
 ```csharp
+// 1. 定时轮询：窗体启动时开启
+private void StartDevicePolling()
+{
+    _pollTimer = new System.Windows.Forms.Timer();
+    _pollTimer.Interval = 2000;
+    _pollTimer.Tick += (s, e) =>
+    {
+        int currentCount = 0;
+        for (uint i = 0; i < 16; i++)
+        {
+            IntPtr h = CH375OpenDevice(i);
+            bool valid = h != IntPtr.Zero && h.ToInt32() != -1;
+            if (h != IntPtr.Zero && h.ToInt32() != -1)
+                CH375CloseDevice(i);
+            if (valid) currentCount++;
+        }
+        if (currentCount != _lastDeviceCount)
+        {
+            _lastDeviceCount = currentCount;
+            SearchDevices();
+        }
+    };
+    _pollTimer.Start();
+}
+
+// 2. WM_DEVICECHANGE：消息触发
 protected override void WndProc(ref Message m)
 {
-    base.WndProc(ref m);
-
     if (m.Msg == WM_DEVICECHANGE)
     {
         int eventType = m.WParam.ToInt32();
@@ -102,9 +134,13 @@ protected override void WndProc(ref Message m)
             eventType == DBT_DEVICEREMOVECOMPLETE ||
             eventType == DBT_DEVNODES_CHANGED)
         {
-            SearchDevices();
+            LogDebug($"WM_DEVICECHANGE: 0x{eventType:X4}");
+            // 3. BeginInvoke 延迟搜索，等待 USB 栈完成
+            BeginInvoke(() => { SearchDevices(); });
+            return;
         }
     }
+    base.WndProc(ref m);
 }
 ```
 
@@ -165,11 +201,13 @@ protected override void WndProc(ref Message m)
 | `CreateDeviceSection()` | 创建设备管理区 |
 | `CreateDownloadSection()` | 创建下载区 |
 | `CreateLogSection()` | 创建日志区 |
-| `WndProc()` | 处理Windows消息 |
+| `StartDevicePolling()` | 启动设备轮询 |
+| `WndProc()` | 处理 Windows 消息 |
 | `SearchDevices()` | 搜索设备 |
 | `UpdateDownloadButtonState()` | 更新按钮状态 |
 | `DownloadProgram()` | 执行下载 |
 | `LogMessage()` | 输出日志 |
+| `LogDebug()` | 调试日志（--debug 模式） |
 
 ### 7.2 控件命名
 
@@ -220,7 +258,13 @@ private void Form1_DragDrop(object sender, DragEventArgs e)
 
 ### 9.1 启用调试输出
 
-当前版本包含调试输出，可在日志中查看：
+使用 `--debug` 或 `-d` 参数启动程序，日志中显示调试信息：
+
+```
+.\WCHIAPToolNew.exe --debug
+```
+
+调试日志输出示例：
 
 ```
 [DEBUG] SearchDevices() 被调用
@@ -232,11 +276,7 @@ private void Form1_DragDrop(object sender, DragEventArgs e)
 
 ### 9.2 关闭调试输出
 
-发布版本可删除或注释调试日志：
-
-```csharp
-// LogMessage($"[DEBUG] SearchDevices() 被调用");
-```
+发布时不带 `--debug` 参数即可关闭调试日志。
 
 ## 10. 窗口属性
 
