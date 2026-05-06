@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -22,6 +23,7 @@ enum ExitCode
     ProgramFailed = 5,
     VerifyFailed = 6,
     Timeout = 7,
+    CompareMismatch = 8,  // for --compare-bin when files differ
 }
 
 // ============================================================================
@@ -33,34 +35,35 @@ class CliArgs
     public int DeviceIndex { get; set; } = -1; // -1 = auto-select first matching
     public ushort VidFilter { get; set; } = 0x4348;
     public ushort PidFilter { get; set; } = 0x55E0;
-    public bool Quiet { get; set; } = false;
-    public bool JsonOutput { get; set; } = false;
-    public bool NoWait { get; set; } = false;
-    public bool Debug { get; set; } = false;
-    public bool InfoOnly { get; set; } = false;
-    public bool SkipVerify { get; set; } = false;
+    public bool Quiet { get; set; }
+    public bool JsonOutput { get; set; }
+    public bool NoWait { get; set; }
+    public bool Debug { get; set; }
+    public bool InfoOnly { get; set; }
+    public bool SkipVerify { get; set; }
     public int TimeoutMs { get; set; } = 30000;
-    public bool ShowHelp { get; set; } = false;
+    public bool ShowHelp { get; set; }
     public string TestHexFile { get; set; } = "";
     public string CompareBinFile1 { get; set; } = "";
     public string CompareBinFile2 { get; set; } = "";
 }
 
 // ============================================================================
-// JSON Output Models
+// JSON Output Models (avoid System.IO.FileInfo / GUI DeviceInfo collisions)
 // ============================================================================
 class IapResult
 {
     public bool Success { get; set; }
     public int ExitCode { get; set; }
     public string Message { get; set; } = "";
-    public DeviceInfo? Device { get; set; }
-    public FileInfo? File { get; set; }
-    public TimingInfo? Timing { get; set; }
-    public string? Error { get; set; }
+    public UsbDeviceEntry? Device { get; set; }
+    public FirmwareFileEntry? File { get; set; }
+    public TimingEntry? Timing { get; set; }
+
+    public string? Error => Success ? null : Message;
 }
 
-class FileInfo
+class FirmwareFileEntry
 {
     public string Path { get; set; } = "";
     public long Size { get; set; }
@@ -68,7 +71,7 @@ class FileInfo
     public string StartAddress { get; set; } = "";
 }
 
-class TimingInfo
+class TimingEntry
 {
     public long EraseMs { get; set; }
     public long ProgramMs { get; set; }
@@ -76,7 +79,7 @@ class TimingInfo
     public long TotalMs { get; set; }
 }
 
-class DeviceInfo
+class UsbDeviceEntry
 {
     public uint Index { get; set; }
     public ushort VendorId { get; set; }
@@ -128,10 +131,11 @@ class Program
 
     // --- State --------------------------------------------------------------
     private static CliArgs _args = new();
-    private static uint _selectedDeviceIndex = 0;
-    private static DeviceInfo? _selectedDevice;
-    private static Stopwatch _totalTimer = new();
-    private static Stopwatch _opTimer = new();
+    private static uint _selectedDeviceIndex;
+    private static UsbDeviceEntry? _selectedDevice;
+    private static FirmwareFileEntry? _loadedFile;
+    private static readonly Stopwatch _totalTimer = new();
+    private static readonly Stopwatch _opTimer = new();
 
     // ========================================================================
     // Main Entry
@@ -150,15 +154,11 @@ class Program
             }
             if (!string.IsNullOrEmpty(_args.TestHexFile))
             {
-                TestHexConversion(_args.TestHexFile);
-                WaitKeyIfNeeded();
-                return (int)ExitCode.Success;
+                return (int)TestHexConversion(_args.TestHexFile);
             }
             if (!string.IsNullOrEmpty(_args.CompareBinFile1))
             {
-                CompareBinFiles(_args.CompareBinFile1, _args.CompareBinFile2);
-                WaitKeyIfNeeded();
-                return (int)ExitCode.Success;
+                return (int)CompareBinFiles(_args.CompareBinFile1, _args.CompareBinFile2);
             }
 
             // Normal IAP mode
@@ -166,7 +166,10 @@ class Program
         }
         catch (Exception ex)
         {
-            OutputError(ExitCode.GeneralError, $"Unexpected error: {ex.Message}");
+            var detail = _args.Debug
+                ? $" (Win32 err: {Marshal.GetLastWin32Error()})"
+                : "";
+            OutputError(ExitCode.GeneralError, $"Unexpected error: {ex.Message}{detail}");
             WaitKeyIfNeeded();
             return (int)ExitCode.GeneralError;
         }
@@ -202,17 +205,15 @@ class Program
                     break;
 
                 case "--vid":
-                    if (i + 1 < args.Length && ushort.TryParse(args[++i],
-                        System.Globalization.NumberStyles.HexNumber, null, out ushort vid))
+                    if (i + 1 < args.Length && TryParseHexUshort(args[++i], out ushort vid))
                         a.VidFilter = vid;
-                    else throw new ArgumentException("--vid requires a hex value (e.g. 4348)");
+                    else throw new ArgumentException("--vid requires a hex value (e.g. 4348 or 0x4348)");
                     break;
 
                 case "--pid":
-                    if (i + 1 < args.Length && ushort.TryParse(args[++i],
-                        System.Globalization.NumberStyles.HexNumber, null, out ushort pid))
+                    if (i + 1 < args.Length && TryParseHexUshort(args[++i], out ushort pid))
                         a.PidFilter = pid;
-                    else throw new ArgumentException("--pid requires a hex value (e.g. 55E0)");
+                    else throw new ArgumentException("--pid requires a hex value (e.g. 55E0 or 0x55E0)");
                     break;
 
                 case "--quiet":
@@ -261,20 +262,22 @@ class Program
                     break;
 
                 default:
-                    // If it looks like a file path (has extension), treat as --file
                     if (Path.HasExtension(args[i]) && string.IsNullOrEmpty(a.FilePath))
-                    {
                         a.FilePath = args[i];
-                    }
                     else
-                    {
                         LogMessage($"Warning: Unknown argument '{args[i]}'", withTimestamp: true);
-                    }
                     break;
             }
         }
 
         return a;
+    }
+
+    static bool TryParseHexUshort(string raw, out ushort value)
+    {
+        if (raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            raw = raw.Substring(2);
+        return ushort.TryParse(raw, NumberStyles.HexNumber, null, out value);
     }
 
     // ========================================================================
@@ -317,7 +320,7 @@ class Program
         }
         else
         {
-            _selectedDevice = devices[0]; // auto-select first
+            _selectedDevice = devices[0];
         }
 
         _selectedDeviceIndex = _selectedDevice.Index;
@@ -327,7 +330,7 @@ class Program
         // --info mode: just show device info and exit
         if (_args.InfoOnly)
         {
-            OutputSuccess(null, "Device information retrieved");
+            OutputSuccess("Device information retrieved");
             return ExitCode.Success;
         }
 
@@ -338,7 +341,7 @@ class Program
             return ExitCode.FileError;
         }
 
-        if (!System.IO.File.Exists(_args.FilePath))
+        if (!File.Exists(_args.FilePath))
         {
             OutputError(ExitCode.FileError, $"File not found: {_args.FilePath}");
             return ExitCode.FileError;
@@ -368,12 +371,12 @@ class Program
         }
         else
         {
-            fileContent = System.IO.File.ReadAllBytes(_args.FilePath);
+            fileContent = File.ReadAllBytes(_args.FilePath);
             fileType = "bin";
             LogMessage($"   Size: {fileContent.Length} bytes (raw binary)");
         }
 
-        var fileInfo = new FileInfo
+        _loadedFile = new FirmwareFileEntry
         {
             Path = _args.FilePath,
             Size = fileContent.Length,
@@ -404,7 +407,6 @@ class Program
             var eraseMs = _opTimer.ElapsedMilliseconds;
             LogMessage($"   Success ({eraseMs}ms)");
 
-            // Check timeout
             if (_totalTimer.ElapsedMilliseconds > _args.TimeoutMs)
             {
                 OutputError(ExitCode.Timeout, "Timeout exceeded after erase");
@@ -422,7 +424,6 @@ class Program
             var programMs = _opTimer.ElapsedMilliseconds;
             LogMessage($"   Success ({programMs}ms, {fileContent.Length * 1000L / Math.Max(programMs, 1)} B/s)");
 
-            // Check timeout
             if (_totalTimer.ElapsedMilliseconds > _args.TimeoutMs)
             {
                 OutputError(ExitCode.Timeout, "Timeout exceeded after program");
@@ -455,7 +456,7 @@ class Program
 
             // --- Success ---
             _totalTimer.Stop();
-            var timing = new TimingInfo
+            var timing = new TimingEntry
             {
                 EraseMs = eraseMs,
                 ProgramMs = programMs,
@@ -463,7 +464,7 @@ class Program
                 TotalMs = _totalTimer.ElapsedMilliseconds,
             };
 
-            OutputSuccess(timing, "IAP download completed successfully");
+            OutputSuccess("IAP download completed successfully", timing);
             return ExitCode.Success;
         }
         finally
@@ -477,9 +478,9 @@ class Program
     // ========================================================================
     // Device Search (with VID/PID filtering and device-name fallback)
     // ========================================================================
-    static List<DeviceInfo> SearchDevices(ushort vidFilter, ushort pidFilter)
+    static List<UsbDeviceEntry> SearchDevices(ushort vidFilter, ushort pidFilter)
     {
-        var devices = new List<DeviceInfo>();
+        var devices = new List<UsbDeviceEntry>();
 
         for (uint i = 0; i < 16; i++)
         {
@@ -516,7 +517,6 @@ class Program
                     }
                 }
 
-                // Apply VID/PID filter
                 if (vendorId == 0 && productId == 0)
                     continue;
                 if (vendorId != vidFilter || productId != pidFilter)
@@ -524,14 +524,13 @@ class Program
                 if (string.IsNullOrEmpty(deviceName))
                     continue;
 
-                var device = new DeviceInfo
+                devices.Add(new UsbDeviceEntry
                 {
                     Index = i,
                     VendorId = vendorId,
                     ProductId = productId,
                     Name = deviceName,
-                };
-                devices.Add(device);
+                });
             }
             catch (Exception ex)
             {
@@ -547,27 +546,16 @@ class Program
     // IAP Protocol Commands
     // ========================================================================
 
-    static IntPtr AllocBuffer(byte[] data)
+    static bool SendEraseCommand()
     {
-        var ptr = Marshal.AllocHGlobal(data.Length);
-        Marshal.Copy(data, 0, ptr, data.Length);
-        return ptr;
-    }
-
-    static byte[] ReadResponse()
-    {
-        byte[] buf = new byte[USB_PACKET_SIZE];
-        uint len = (uint)buf.Length;
-        IntPtr ptr = Marshal.AllocHGlobal((int)len);
         try
         {
-            bool ok = CH375ReadData(_selectedDeviceIndex, ptr, ref len);
-            if (ok) Marshal.Copy(ptr, buf, 0, (int)len);
-            return ok ? buf : new byte[0];
+            return SendCommandAndCheck(CMD_IAP_ERASE);
         }
-        finally
+        catch (Exception ex)
         {
-            Marshal.FreeHGlobal(ptr);
+            LogDebug($"Erase exception: {ex.Message}");
+            return false;
         }
     }
 
@@ -584,41 +572,27 @@ class Program
         try
         {
             Marshal.Copy(cmdBuf, 0, ptr, (int)len);
-            bool ok = CH375WriteData(_selectedDeviceIndex, ptr, ref len);
-            if (!ok) return false;
+            if (!CH375WriteData(_selectedDeviceIndex, ptr, ref len))
+                return false;
         }
         finally
         {
             Marshal.FreeHGlobal(ptr);
         }
 
-        // Read response
         byte[] resp = new byte[USB_PACKET_SIZE];
         len = (uint)resp.Length;
         ptr = Marshal.AllocHGlobal((int)len);
         try
         {
-            bool ok = CH375ReadData(_selectedDeviceIndex, ptr, ref len);
-            if (!ok) return false;
+            if (!CH375ReadData(_selectedDeviceIndex, ptr, ref len))
+                return false;
             Marshal.Copy(ptr, resp, 0, (int)len);
             return resp[0] == ERR_SUCCESS;
         }
         finally
         {
             Marshal.FreeHGlobal(ptr);
-        }
-    }
-
-    static bool SendEraseCommand()
-    {
-        try
-        {
-            return SendCommandAndCheck(CMD_IAP_ERASE);
-        }
-        catch (Exception ex)
-        {
-            LogDebug($"Erase exception: {ex.Message}");
-            return false;
         }
     }
 
@@ -672,7 +646,6 @@ class Program
 
                 offset += chunkSize;
 
-                // Progress every 4KB (match GUI behavior)
                 if (offset - lastReport >= 4096 || offset == fileContent.Length)
                 {
                     LogMessage($"   Written {offset} / {fileContent.Length} bytes ({(offset * 100.0 / fileContent.Length):F1}%)");
@@ -772,7 +745,6 @@ class Program
                 Marshal.FreeHGlobal(ptr);
             }
 
-            // Read response (may fail if device already reset - this is expected)
             byte[] resp = new byte[USB_PACKET_SIZE];
             len = (uint)resp.Length;
             ptr = Marshal.AllocHGlobal((int)len);
@@ -803,12 +775,14 @@ class Program
     // Output Helpers
     // ========================================================================
 
+    // In JSON mode, suppress ALL LogMessage output to keep stdout clean.
+    // Only OutputSuccess / OutputError write to stdout in JSON mode.
     static void LogMessage(string message, bool forceOutput = false, bool withTimestamp = false)
     {
-        if (_args.Quiet && !forceOutput && !_args.JsonOutput)
+        if (_args.JsonOutput)
             return;
 
-        if (_args.JsonOutput && !forceOutput)
+        if (_args.Quiet && !forceOutput)
             return;
 
         if (withTimestamp || _args.Debug)
@@ -820,7 +794,7 @@ class Program
     static void LogDebug(string message)
     {
         if (_args.Debug && !_args.JsonOutput)
-            Console.WriteLine($"[DEBUG {DateTime.Now:HH:mm:ss}] {message}");
+            Console.Error.WriteLine($"[DEBUG {DateTime.Now:HH:mm:ss}] {message}");
     }
 
     static void OutputError(ExitCode code, string message)
@@ -832,7 +806,7 @@ class Program
                 Success = false,
                 ExitCode = (int)code,
                 Message = message,
-                Error = message,
+                Device = _selectedDevice,
             };
             Console.WriteLine(JsonSerializer.Serialize(result,
                 new JsonSerializerOptions { WriteIndented = false }));
@@ -845,7 +819,7 @@ class Program
         }
     }
 
-    static void OutputSuccess(TimingInfo? timing, string message)
+    static void OutputSuccess(string message, TimingEntry? timing = null)
     {
         if (_args.JsonOutput)
         {
@@ -855,12 +829,7 @@ class Program
                 ExitCode = 0,
                 Message = message,
                 Device = _selectedDevice,
-                File = new FileInfo
-                {
-                    Path = _args.FilePath,
-                    Size = 0, // filled in RunIapMode
-                    Type = _args.FilePath.EndsWith(".hex", StringComparison.OrdinalIgnoreCase) ? "hex" : "bin",
-                },
+                File = _loadedFile,
                 Timing = timing,
             };
             Console.WriteLine(JsonSerializer.Serialize(result,
@@ -876,16 +845,8 @@ class Program
                     $"Verify={timing.VerifyMs}ms, Total={timing.TotalMs}ms");
             }
         }
-    }
 
-    static void WaitKeyIfNeeded()
-    {
-        if (!_args.NoWait && !_args.JsonOutput)
-        {
-            Console.WriteLine();
-            Console.WriteLine("Press any key to exit...");
-            Console.ReadKey();
-        }
+        WaitKeyIfNeeded();
     }
 
     // ========================================================================
@@ -902,14 +863,14 @@ Usage:
 Options:
   --file, -f <path>      Firmware file to download (.hex or .bin)
   --device, -d <index>   Device index (default: auto-select first matching)
-  --vid <hex>            VID filter (default: 4348 for WCH)
-  --pid <hex>            PID filter (default: 55E0 for WCH IAP)
+  --vid <hex>            VID filter (default: 4348)
+  --pid <hex>            PID filter (default: 55E0)
   --quiet, -q            Suppress non-essential output
   --json                 Output result as JSON (for agent/script parsing)
   --no-wait              Exit immediately, don't wait for keypress
   --timeout <ms>         Overall timeout in milliseconds (default: 30000)
   --skip-verify          Skip flash verification step
-  --debug, --debug       Enable debug output
+  --debug                Enable debug output (to stderr)
   --info                 Show device information only, no download
   --help, -h             Show this help
 
@@ -926,12 +887,13 @@ Exit Codes:
   5  Program failed
   6  Verify failed
   7  Timeout exceeded
+  8  Files differ (--compare-bin)
 
 Examples:
   WCHIAPToolCLI --file firmware.hex
   WCHIAPToolCLI -f firmware.bin -d 1 --no-wait
   WCHIAPToolCLI --file app.hex --json
-  WCHIAPToolCLI --vid 4348 --pid 55E0 --info
+  WCHIAPToolCLI --vid 0x4348 --pid 0x55E0 --info
   WCHIAPToolCLI --test-hex firmware.hex
   WCHIAPToolCLI --compare-bin a.bin b.bin
   WCHIAPToolCLI firmware.hex       (positional file path)
@@ -939,27 +901,27 @@ Examples:
     }
 
     // ========================================================================
-    // Tool Commands (--test-hex, --compare-bin)
+    // Tool Commands (--test-hex, --compare-bin) — now return ExitCode
     // ========================================================================
 
-    static void TestHexConversion(string hexFile)
+    static ExitCode TestHexConversion(string hexFile)
     {
         Console.WriteLine($"Testing HEX file: {hexFile}");
         Console.WriteLine();
 
-        if (!System.IO.File.Exists(hexFile))
+        if (!File.Exists(hexFile))
         {
-            Console.WriteLine($"File not found: {hexFile}");
-            return;
+            Console.Error.WriteLine($"File not found: {hexFile}");
+            WaitKeyIfNeeded();
+            return ExitCode.FileError;
         }
 
         try
         {
-            var lines = System.IO.File.ReadAllLines(hexFile);
+            var lines = File.ReadAllLines(hexFile);
             Console.WriteLine($"Total lines: {lines.Length}");
             Console.WriteLine();
 
-            // Show first 10 parsed lines
             Console.WriteLine("First 10 data records:");
             int lineCount = 0;
             foreach (var line in lines)
@@ -1000,7 +962,6 @@ Examples:
 
             Console.WriteLine();
 
-            // Show last 5 records
             var lastLines = new List<string>();
             foreach (var line in lines)
             {
@@ -1027,7 +988,6 @@ Examples:
 
             Console.WriteLine();
 
-            // Full conversion
             var hexResult = WchHexToBinConverter.ConvertHexToBin(hexFile);
             Console.WriteLine("Conversion result:");
             Console.WriteLine($"  Data size:    {hexResult.Data.Length} bytes ({hexResult.Data.Length / 1024.0:F1} KB)");
@@ -1035,7 +995,6 @@ Examples:
             Console.WriteLine($"  End address:   0x{hexResult.StartAddress + (uint)hexResult.Data.Length:X8}");
             Console.WriteLine();
 
-            // Show first 64 bytes
             Console.WriteLine("First 64 bytes of BIN data:");
             int showLen = Math.Min(64, hexResult.Data.Length);
             for (int i = 0; i < showLen; i++)
@@ -1045,37 +1004,43 @@ Examples:
             }
             Console.WriteLine();
 
-            // Save test output
             string binFile = Path.ChangeExtension(hexFile, ".test.bin");
-            System.IO.File.WriteAllBytes(binFile, hexResult.Data);
+            File.WriteAllBytes(binFile, hexResult.Data);
             Console.WriteLine($"Test BIN saved to: {binFile}");
+
+            WaitKeyIfNeeded();
+            return ExitCode.Success;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Conversion failed: {ex.Message}");
+            Console.Error.WriteLine($"Conversion failed: {ex.Message}");
+            WaitKeyIfNeeded();
+            return ExitCode.FileError;
         }
     }
 
-    static void CompareBinFiles(string file1, string file2)
+    static ExitCode CompareBinFiles(string file1, string file2)
     {
         Console.WriteLine($"Comparing BIN files:");
         Console.WriteLine($"  File 1: {file1}");
         Console.WriteLine($"  File 2: {file2}");
         Console.WriteLine();
 
-        if (!System.IO.File.Exists(file1))
+        if (!File.Exists(file1))
         {
-            Console.WriteLine($"File not found: {file1}");
-            return;
+            Console.Error.WriteLine($"File not found: {file1}");
+            WaitKeyIfNeeded();
+            return ExitCode.FileError;
         }
-        if (!System.IO.File.Exists(file2))
+        if (!File.Exists(file2))
         {
-            Console.WriteLine($"File not found: {file2}");
-            return;
+            Console.Error.WriteLine($"File not found: {file2}");
+            WaitKeyIfNeeded();
+            return ExitCode.FileError;
         }
 
-        byte[] data1 = System.IO.File.ReadAllBytes(file1);
-        byte[] data2 = System.IO.File.ReadAllBytes(file2);
+        byte[] data1 = File.ReadAllBytes(file1);
+        byte[] data2 = File.ReadAllBytes(file2);
 
         Console.WriteLine($"File 1 size: {data1.Length} bytes");
         Console.WriteLine($"File 2 size: {data2.Length} bytes");
@@ -1102,6 +1067,8 @@ Examples:
         if (diffCount == 0 && data1.Length == data2.Length)
         {
             Console.WriteLine("Files are identical.");
+            WaitKeyIfNeeded();
+            return ExitCode.Success;
         }
         else
         {
@@ -1132,7 +1099,6 @@ Examples:
                 Console.WriteLine();
             }
 
-            // List up to 10 differences
             Console.WriteLine();
             Console.WriteLine("First 10 differences:");
             int shown = 0;
@@ -1144,6 +1110,26 @@ Examples:
                     shown++;
                 }
             }
+
+            WaitKeyIfNeeded();
+            return ExitCode.CompareMismatch;
+        }
+    }
+
+    static void WaitKeyIfNeeded()
+    {
+        if (_args.NoWait || _args.JsonOutput)
+            return;
+
+        try
+        {
+            Console.WriteLine();
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
+        }
+        catch (InvalidOperationException)
+        {
+            // Console input is redirected (piped/automated) — skip
         }
     }
 }
