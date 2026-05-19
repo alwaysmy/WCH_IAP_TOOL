@@ -41,6 +41,7 @@ class CliArgs
     public bool Debug { get; set; }
     public bool InfoOnly { get; set; }
     public bool SkipVerify { get; set; }
+    public bool SkipProg { get; set; }
     public int TimeoutMs { get; set; } = 30000;
     public bool ShowHelp { get; set; }
     public string TestHexFile { get; set; } = "";
@@ -241,6 +242,10 @@ class Program
                     a.SkipVerify = true;
                     break;
 
+                case "--skip_prog":
+                    a.SkipProg = true;
+                    break;
+
                 case "--timeout":
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int toMs))
                         a.TimeoutMs = toMs;
@@ -335,54 +340,61 @@ class Program
         }
 
         // --- 2. Load file ---
-        if (string.IsNullOrEmpty(_args.FilePath))
-        {
-            OutputError(ExitCode.FileError, "No file specified. Use --file <path> or pass file as argument.");
-            return ExitCode.FileError;
-        }
-
-        if (!File.Exists(_args.FilePath))
-        {
-            OutputError(ExitCode.FileError, $"File not found: {_args.FilePath}");
-            return ExitCode.FileError;
-        }
-
-        LogMessage($"2. Loading file: {_args.FilePath}", forceOutput: true);
-
-        byte[] fileContent;
-        string fileType;
+        byte[]? fileContent = null;
+        string fileType = "";
         uint startAddress = 0;
 
-        if (_args.FilePath.EndsWith(".hex", StringComparison.OrdinalIgnoreCase))
+        if (!_args.SkipProg)
         {
-            LogMessage("   Converting HEX to BIN...");
-            var hexResult = WchHexToBinConverter.ConvertHexToBin(_args.FilePath);
-            fileContent = hexResult.Data;
-            startAddress = hexResult.StartAddress;
-            fileType = "hex";
-
-            if (fileContent.Length == 0)
+            if (string.IsNullOrEmpty(_args.FilePath))
             {
-                OutputError(ExitCode.FileError, "HEX file contains no data");
+                OutputError(ExitCode.FileError, "No file specified. Use --file <path> or pass file as argument.");
                 return ExitCode.FileError;
             }
 
-            LogMessage($"   Size: {fileContent.Length} bytes, Start: 0x{startAddress:X8}");
+            if (!File.Exists(_args.FilePath))
+            {
+                OutputError(ExitCode.FileError, $"File not found: {_args.FilePath}");
+                return ExitCode.FileError;
+            }
+
+            LogMessage($"2. Loading file: {_args.FilePath}", forceOutput: true);
+
+            if (_args.FilePath.EndsWith(".hex", StringComparison.OrdinalIgnoreCase))
+            {
+                LogMessage("   Converting HEX to BIN...");
+                var hexResult = WchHexToBinConverter.ConvertHexToBin(_args.FilePath);
+                fileContent = hexResult.Data;
+                startAddress = hexResult.StartAddress;
+                fileType = "hex";
+
+                if (fileContent.Length == 0)
+                {
+                    OutputError(ExitCode.FileError, "HEX file contains no data");
+                    return ExitCode.FileError;
+                }
+
+                LogMessage($"   Size: {fileContent.Length} bytes, Start: 0x{startAddress:X8}");
+            }
+            else
+            {
+                fileContent = File.ReadAllBytes(_args.FilePath);
+                fileType = "bin";
+                LogMessage($"   Size: {fileContent.Length} bytes (raw binary)");
+            }
+
+            _loadedFile = new FirmwareFileEntry
+            {
+                Path = _args.FilePath,
+                Size = fileContent.Length,
+                Type = fileType,
+                StartAddress = $"0x{startAddress:X8}",
+            };
         }
         else
         {
-            fileContent = File.ReadAllBytes(_args.FilePath);
-            fileType = "bin";
-            LogMessage($"   Size: {fileContent.Length} bytes (raw binary)");
+            LogMessage($"2. Skip file loading (--skip_prog)");
         }
-
-        _loadedFile = new FirmwareFileEntry
-        {
-            Path = _args.FilePath,
-            Size = fileContent.Length,
-            Type = fileType,
-            StartAddress = $"0x{startAddress:X8}",
-        };
 
         // --- 3. Open device ---
         LogMessage("3. Opening device...", forceOutput: true);
@@ -397,56 +409,63 @@ class Program
         try
         {
             // --- 4. Erase ---
-            LogMessage("4. Erasing flash...", forceOutput: true);
-            _opTimer.Restart();
-            if (!SendEraseCommand())
+            long eraseMs = 0, programMs = 0, verifyMs = 0;
+            if (!_args.SkipProg)
             {
-                OutputError(ExitCode.EraseFailed, "Erase command failed");
-                return ExitCode.EraseFailed;
-            }
-            var eraseMs = _opTimer.ElapsedMilliseconds;
-            LogMessage($"   Success ({eraseMs}ms)");
-
-            if (_totalTimer.ElapsedMilliseconds > _args.TimeoutMs)
-            {
-                OutputError(ExitCode.Timeout, "Timeout exceeded after erase");
-                return ExitCode.Timeout;
-            }
-
-            // --- 5. Program ---
-            LogMessage($"5. Programming flash ({fileContent.Length} bytes)...", forceOutput: true);
-            _opTimer.Restart();
-            if (!SendProgramData(fileContent))
-            {
-                OutputError(ExitCode.ProgramFailed, "Program command failed");
-                return ExitCode.ProgramFailed;
-            }
-            var programMs = _opTimer.ElapsedMilliseconds;
-            LogMessage($"   Success ({programMs}ms, {fileContent.Length * 1000L / Math.Max(programMs, 1)} B/s)");
-
-            if (_totalTimer.ElapsedMilliseconds > _args.TimeoutMs)
-            {
-                OutputError(ExitCode.Timeout, "Timeout exceeded after program");
-                return ExitCode.Timeout;
-            }
-
-            // --- 6. Verify ---
-            long verifyMs = 0;
-            if (!_args.SkipVerify)
-            {
-                LogMessage("6. Verifying flash...", forceOutput: true);
+                LogMessage("4. Erasing flash...", forceOutput: true);
                 _opTimer.Restart();
-                if (!SendVerifyCommand(fileContent))
+                if (!SendEraseCommand())
                 {
-                    OutputError(ExitCode.VerifyFailed, "Verify failed - flash content mismatch");
-                    return ExitCode.VerifyFailed;
+                    OutputError(ExitCode.EraseFailed, "Erase command failed");
+                    return ExitCode.EraseFailed;
                 }
-                verifyMs = _opTimer.ElapsedMilliseconds;
-                LogMessage($"   Success ({verifyMs}ms)");
+                eraseMs = _opTimer.ElapsedMilliseconds;
+                LogMessage($"   Success ({eraseMs}ms)");
+
+                if (_totalTimer.ElapsedMilliseconds > _args.TimeoutMs)
+                {
+                    OutputError(ExitCode.Timeout, "Timeout exceeded after erase");
+                    return ExitCode.Timeout;
+                }
+
+                // --- 5. Program ---
+                LogMessage($"5. Programming flash ({fileContent!.Length} bytes)...", forceOutput: true);
+                _opTimer.Restart();
+                if (!SendProgramData(fileContent))
+                {
+                    OutputError(ExitCode.ProgramFailed, "Program command failed");
+                    return ExitCode.ProgramFailed;
+                }
+                programMs = _opTimer.ElapsedMilliseconds;
+                LogMessage($"   Success ({programMs}ms, {fileContent.Length * 1000L / Math.Max(programMs, 1)} B/s)");
+
+                if (_totalTimer.ElapsedMilliseconds > _args.TimeoutMs)
+                {
+                    OutputError(ExitCode.Timeout, "Timeout exceeded after program");
+                    return ExitCode.Timeout;
+                }
+
+                // --- 6. Verify ---
+                if (!_args.SkipVerify)
+                {
+                    LogMessage("6. Verifying flash...", forceOutput: true);
+                    _opTimer.Restart();
+                    if (!SendVerifyCommand(fileContent))
+                    {
+                        OutputError(ExitCode.VerifyFailed, "Verify failed - flash content mismatch");
+                        return ExitCode.VerifyFailed;
+                    }
+                    verifyMs = _opTimer.ElapsedMilliseconds;
+                    LogMessage($"   Success ({verifyMs}ms)");
+                }
+                else
+                {
+                    LogMessage("6. Verify skipped (--skip-verify)", forceOutput: true);
+                }
             }
             else
             {
-                LogMessage("6. Verify skipped (--skip-verify)", forceOutput: true);
+                LogMessage("4-6. Skipped (--skip_prog)", forceOutput: true);
             }
 
             // --- 7. End ---
@@ -879,6 +898,7 @@ Options:
   --no-wait              Exit immediately, don't wait for keypress
   --timeout <ms>         Overall timeout in milliseconds (default: 30000)
   --skip-verify          Skip flash verification step
+  --skip_prog            Skip erase/program/verify (just send END to exit bootloader)
   --debug                Enable debug output (to stderr)
   --info                 Show device information only, no download
   --help, -h             Show this help
