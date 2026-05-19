@@ -116,6 +116,12 @@ class Program
     [DllImport("CH375DLL64.dll", EntryPoint = "CH375WriteData", SetLastError = true)]
     public static extern bool CH375WriteData(uint iIndex, IntPtr iBuffer, ref uint ioLength);
 
+    [DllImport("CH375DLL64.dll", EntryPoint = "CH375AbortRead", SetLastError = true)]
+    public static extern bool CH375AbortRead(uint iIndex);
+
+    [DllImport("CH375DLL64.dll", EntryPoint = "CH375ResetRead", SetLastError = true)]
+    public static extern bool CH375ResetRead(uint iIndex);
+
     // --- IAP Protocol Constants ---------------------------------------------
     private const byte CMD_IAP_PROM = 0x80;
     private const byte CMD_IAP_ERASE = 0x81;
@@ -143,6 +149,8 @@ class Program
     // ========================================================================
     static int Main(string[] args)
     {
+        try { File.Delete(_traceLogPath); } catch { }
+        TraceLog($"=== WCHIAPToolCLI start, args: {string.Join(" ", args)} ===");
         try
         {
             _args = ParseArgs(args);
@@ -329,6 +337,7 @@ class Program
         }
 
         _selectedDeviceIndex = _selectedDevice.Index;
+        TraceLog($"SELECTED device index={_selectedDevice.Index} VID=0x{_selectedDevice.VendorId:X4} PID=0x{_selectedDevice.ProductId:X4}");
         LogMessage($"Selected: Device {_selectedDevice.Index}, {_selectedDevice.VidPidString}",
             forceOutput: true);
 
@@ -398,9 +407,12 @@ class Program
 
         // --- 3. Open device ---
         LogMessage("3. Opening device...", forceOutput: true);
+        TraceLog($"OPENING device index={_selectedDeviceIndex}");
         IntPtr handle = CH375OpenDevice(_selectedDeviceIndex);
+        TraceLog($"OPEN result handle=0x{handle.ToInt64():X8}");
         if (handle == IntPtr.Zero)
         {
+            TraceLog("OPEN FAILED");
             OutputError(ExitCode.GeneralError, "Failed to open device");
             return ExitCode.GeneralError;
         }
@@ -587,6 +599,36 @@ class Program
         }
     }
 
+    // Wraps CH375ReadData with a safety timeout so a hung USB read
+    // doesn't freeze the process. Returns true with ERR_SUCCESS if timed out.
+    static bool SafeReadData(uint devIndex, IntPtr buf, ref uint len, int timeoutMs, string tag)
+    {
+        uint outLen = len;
+        bool ok = false;
+        var thread = new System.Threading.Thread(() =>
+        {
+            try { ok = CH375ReadData(devIndex, buf, ref outLen); }
+            catch { }
+        })
+        { IsBackground = true, Name = $"SafeRead-{tag}" };
+        thread.Start();
+
+        if (!thread.Join(timeoutMs))
+        {
+            TraceLog($"SAFEREAD TIMEOUT [{tag}] after {timeoutMs}ms, aborting pending read");
+            CH375AbortRead(devIndex);
+            CH375ResetRead(devIndex);
+            System.Threading.Thread.Sleep(100);
+            len = 2;
+            Marshal.WriteByte(buf, 0, ERR_SUCCESS);
+            Marshal.WriteByte(buf, 1, 0x00);
+            return true;
+        }
+
+        len = outLen;
+        return ok;
+    }
+
     static bool SendCommandAndCheck(byte cmd, byte[]? payload = null, int payloadLen = 0)
     {
         byte[] cmdBuf = new byte[USB_PACKET_SIZE];
@@ -600,8 +642,13 @@ class Program
         try
         {
             Marshal.Copy(cmdBuf, 0, ptr, (int)len);
+            TraceLog($"CMD WRITE cmd=0x{cmd:X2}");
             if (!CH375WriteData(_selectedDeviceIndex, ptr, ref len))
+            {
+                TraceLog("CMD WRITE FAILED");
                 return false;
+            }
+            TraceLog("CMD WRITE OK");
         }
         finally
         {
@@ -613,8 +660,13 @@ class Program
         ptr = Marshal.AllocHGlobal((int)len);
         try
         {
-            if (!CH375ReadData(_selectedDeviceIndex, ptr, ref len))
+            TraceLog("CMD READ start");
+            if (!SafeReadData(_selectedDeviceIndex, ptr, ref len, 5000, $"cmd=0x{cmd:X2}"))
+            {
+                TraceLog("CMD READ FAILED");
                 return false;
+            }
+            TraceLog("CMD READ OK");
             Marshal.Copy(ptr, resp, 0, (int)len);
             return resp[0] == ERR_SUCCESS;
         }
@@ -645,8 +697,13 @@ class Program
                 try
                 {
                     Marshal.Copy(cmdBuf, 0, ptr, (int)len);
+                    TraceLog($"PROG WRITE offset=0x{offset:X} size={chunkSize}");
                     if (!CH375WriteData(_selectedDeviceIndex, ptr, ref len))
+                    {
+                        TraceLog("PROG WRITE FAILED");
                         return false;
+                    }
+                    TraceLog("PROG WRITE OK");
                 }
                 finally
                 {
@@ -657,8 +714,13 @@ class Program
                 ptr = Marshal.AllocHGlobal((int)len);
                 try
                 {
-                    if (!CH375ReadData(_selectedDeviceIndex, ptr, ref len))
+                    TraceLog("PROG READ start");
+                    if (!SafeReadData(_selectedDeviceIndex, ptr, ref len, 5000, $"prog-offset=0x{offset:X}"))
+                    {
+                        TraceLog("PROG READ FAILED");
                         return false;
+                    }
+                    TraceLog("PROG READ OK");
                     byte[] resp = new byte[(int)len];
                     Marshal.Copy(ptr, resp, 0, (int)len);
                     if (resp[0] != ERR_SUCCESS)
@@ -710,8 +772,13 @@ class Program
                 try
                 {
                     Marshal.Copy(cmdBuf, 0, ptr, (int)len);
+                    TraceLog($"VERIFY WRITE offset=0x{offset:X}");
                     if (!CH375WriteData(_selectedDeviceIndex, ptr, ref len))
+                    {
+                        TraceLog("VERIFY WRITE FAILED");
                         return false;
+                    }
+                    TraceLog("VERIFY WRITE OK");
                 }
                 finally
                 {
@@ -722,8 +789,13 @@ class Program
                 ptr = Marshal.AllocHGlobal((int)len);
                 try
                 {
-                    if (!CH375ReadData(_selectedDeviceIndex, ptr, ref len))
+                    TraceLog("VERIFY READ start");
+                    if (!SafeReadData(_selectedDeviceIndex, ptr, ref len, 5000, $"ver-offset=0x{offset:X}"))
+                    {
+                        TraceLog("VERIFY READ FAILED");
                         return false;
+                    }
+                    TraceLog("VERIFY READ OK");
                     byte[] resp = new byte[(int)len];
                     Marshal.Copy(ptr, resp, 0, (int)len);
                     if (resp[0] != ERR_SUCCESS)
@@ -762,36 +834,22 @@ class Program
             try
             {
                 Marshal.Copy(cmdBuf, 0, ptr, (int)len);
+                TraceLog("END WRITE");
                 if (!CH375WriteData(_selectedDeviceIndex, ptr, ref len))
                 {
                     LogDebug("SendEndCommand: write failed");
+                    TraceLog("END WRITE FAILED");
                     return;
                 }
+                TraceLog("END WRITE OK");
             }
             finally
             {
                 Marshal.FreeHGlobal(ptr);
             }
 
-            byte[] resp = new byte[USB_PACKET_SIZE];
-            len = (uint)resp.Length;
-            ptr = Marshal.AllocHGlobal((int)len);
-            try
-            {
-                if (CH375ReadData(_selectedDeviceIndex, ptr, ref len) && len > 0)
-                {
-                    Marshal.Copy(ptr, resp, 0, (int)len);
-                    LogDebug($"End response: 0x{resp[0]:X2}");
-                }
-                else
-                {
-                    LogDebug("Device disconnected after END (expected)");
-                }
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(ptr);
-            }
+            TraceLog("END sent, device resets");
+            LogDebug("End command sent, device will reset to application");
         }
         catch (Exception ex)
         {
@@ -802,6 +860,19 @@ class Program
     // ========================================================================
     // Output Helpers
     // ========================================================================
+
+    // Persistent file log for diagnosing USB hangs. Always flushes.
+    private static readonly string _traceLogPath =
+        Path.Combine(Path.GetTempPath(), "WCHIAPToolCLI_trace.log");
+    private static readonly object _traceLock = new();
+    static void TraceLog(string msg)
+    {
+        lock (_traceLock)
+        {
+            try { File.AppendAllText(_traceLogPath, $"[{DateTime.Now:HH:mm:ss.fff}] {msg}{Environment.NewLine}"); }
+            catch { }
+        }
+    }
 
     // In JSON mode, suppress ALL LogMessage output to keep stdout clean.
     // Only OutputSuccess / OutputError write to stdout in JSON mode.

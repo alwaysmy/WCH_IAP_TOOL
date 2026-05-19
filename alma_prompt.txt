@@ -1,0 +1,27 @@
+你正在审查一个 WCH IAP (In-Application Programming) 工具项目。它分为两部分：
+
+1. 上位机 (PC TOOL): WCH_IAP_TOOL/
+   - WCHIAPToolCLI/ — CLI 命令行版 (C#, .NET 9.0)
+   - WCHIAPToolNew/ — GUI 桌面版 (WinForms)
+   - 通过 CH375DLL64.dll 与 MCU 通信
+   - 功能: USB设备搜索、HEX/BIN烧录、擦除->编程->验证->结束流程
+
+2. 固件 (FIRMWARE): CH32V30x_IAP_RevA/
+   - CH32V30x RISC-V MCU 的 IAP bootloader
+   - 支持通过 USB (CH375桥接) 进行 IAP 升级
+
+当前已完成:
+- CLI 完整重写: --json, --quiet, --no-wait, --debug, --info, 退出码, VID/PID过滤
+- GUI 修复: 设备热插拔检测(定时轮询+WndProc), VID/PID回退, 文件历史记录
+- 文档更新
+
+待办:
+- Phase 2: 固件 BKP 寄存器应用验证 (CRC32, 启动决策改进)
+- 单EXE双模式 (GUI默认 + --batch CLI)
+- CLI/GUI 共享协议库抽取
+- GUI 异步下载防界面卡死
+
+请分析这个项目，给出优化建议。重点：
+1. 当前最急需改进的是什么？
+2. 固件 BKP 方案有什么潜在问题？
+3. 代码结构上有什么可改进的？
