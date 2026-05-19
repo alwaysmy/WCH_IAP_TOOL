@@ -42,7 +42,7 @@ class CliArgs
     public bool InfoOnly { get; set; }
     public bool SkipVerify { get; set; }
     public bool SkipProg { get; set; }
-    public int TimeoutMs { get; set; } = 30000;
+    public int TimeoutMs { get; set; } = 90000;
     public bool ShowHelp { get; set; }
     public string TestHexFile { get; set; } = "";
     public string CompareBinFile1 { get; set; } = "";
