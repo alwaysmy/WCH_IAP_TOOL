@@ -2,7 +2,7 @@
 
 ## 简介
 
-WCH IAP Tool CLI 是一款命令行 IAP（In-Application Programming）下载工具，用于通过 USB 接口（CH375 桥接芯片）为沁恒（WCH）CH32 系列单片机烧录固件。
+WCH IAP Tool CLI 是一款命令行 IAP（In-Application Programming）下载工具，支持 **WinUSB 免驱** 和 **CH375 桥接** 两种通信后端，兼容 RevA / RevB 固件。
 
 > 适用场景：自动化烧录、产线测试、CI/CD 集成、脚本化部署。
 
@@ -11,8 +11,10 @@ WCH IAP Tool CLI 是一款命令行 IAP（In-Application Programming）下载工
 ### 前提条件
 
 - Windows x64 系统
-- CH375DLL64.dll 与可执行文件在同一目录
+- **WinUSB 模式**：Windows 10+ 自动识别，无需额外驱动
+- **CH375 模式**：CH375DLL64.dll 与可执行文件在同一目录
 - CH32 单片机已通过 USB 连接（IAP bootloader 模式）
+- 默认 `--auto` 模式自动检测后端
 
 ### 最小化使用
 
@@ -42,9 +44,17 @@ if ($result.success) { "OK" } else { exit $result.exitCode }
 | `--device, -d <index>` | int | 自动选择 | 设备索引，仅在有多个设备时使用 |
 | `--vid <hex>` | hex | 4348 | USB VID 过滤 |
 | `--pid <hex>` | hex | 55E0 | USB PID 过滤 |
-| `--timeout <ms>` | int | 30000 | 整体超时时间（毫秒） |
+| `--timeout <ms>` | int | 90000 | 整体超时时间（毫秒） |
 | `--skip-verify` | flag | false | 跳过验证步骤（加快烧录，不推荐生产环境使用） |
 | `--skip_prog` | flag | false | 跳过擦除/编程/校验，仅发结束命令退出 bootloader |
+
+### 后端选择
+
+| 参数 | 说明 |
+|------|------|
+| `--auto` | **默认**，自动检测后端（Service 注册表 WINUSB/CH375） |
+| `--ch375` | 强制 CH375 后端（RevA 固件） |
+| `--winusb` | 强制 WinUSB 后端（RevB 固件，需 Win10+） |
 
 ### 输出控制
 

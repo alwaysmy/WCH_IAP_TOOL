@@ -1078,10 +1078,13 @@ Options:
   --device, -d <index>   Device index (default: auto-select first matching)
   --vid <hex>            VID filter (default: 4348)
   --pid <hex>            PID filter (default: 55E0)
+  --ch375                Force CH375 backend (RevA)
+  --winusb               Force WinUSB backend (RevB)
+  --auto                 Auto-detect backend (default: --auto)
   --quiet, -q            Suppress non-essential output
   --json                 Output result as JSON (for agent/script parsing)
   --no-wait              Exit immediately, don't wait for keypress
-  --timeout <ms>         Overall timeout in milliseconds (default: 30000)
+  --timeout <ms>         Overall timeout in milliseconds (default: 90000)
   --skip-verify          Skip flash verification step
   --skip_prog            Skip erase/program/verify (just send END to exit bootloader)
   --debug                Enable debug output (to stderr)
