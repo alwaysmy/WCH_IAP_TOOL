@@ -206,7 +206,23 @@ class Ch375UsbDevice : IapUsbDevice
 {
     private uint _index;
     public Ch375UsbDevice(UsbDeviceEntry info) : base(info) { _index = info.Index; }
-    public override bool Open() { Info.Handle = CH375OpenDevice(_index); return Info.Handle != IntPtr.Zero; }
+    public override bool Open()
+    {
+        // CH375 index differs from SetupDi enumeration order.
+        IntPtr invalid = new IntPtr(-1);
+        for (uint i = 0; i < 16; i++)
+        {
+            IntPtr h = CH375OpenDevice(i);
+            if (h != IntPtr.Zero && h != invalid)
+            {
+                _index = i;
+                Info.Handle = h;
+                Info.Index = i;
+                return true;
+            }
+        }
+        return false;
+    }
     public override bool WritePipe(byte[] buf, ref uint len)
     {
         IntPtr ptr = Marshal.AllocHGlobal((int)len);

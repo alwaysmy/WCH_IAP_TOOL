@@ -165,9 +165,22 @@ ReadDeviceProperty(SPDRP_SERVICE):
 
 ---
 
-## 五、待办
+## 五、遗留问题
 
-- [ ] 完整 IAP 烧录测试 (ERASE→PROGRAM→VERIFY→END)
+**CH375 大文件下载挂死**
+
+CH375 驱动 (`CH375DLL64.dll`) 在传输大文件（>~16KB）时，`CH375ReadData` 会在多次读写后永久阻塞。小文件（~6KB bootloader）偶尔能通过。WinUSB 无此问题。
+
+| 后端 | 6KB | 64KB | 96KB |
+|------|-----|------|------|
+| WinUSB | ✅ | ✅ | ✅ |
+| CH375 | ✅ | ❌ 挂死 | ❌ 挂死 |
+
+**兼容策略**：CH375 后端保留（`--ch375` 参数），小文件可用。`--auto` 默认走 WinUSB。以后逆向 DLL 排查或直接废弃。
+
+## 六、待办
+
+- [x] 完整 IAP 烧录测试 (ERASE→PROGRAM→VERIFY→END) — WinUSB 通过
 - [ ] GUI (Form1.cs) 同步改为 IapUsbDevice 接口
 - [ ] --help 文本更新
 - [ ] 删除临时 debug 日志行
