@@ -6,9 +6,104 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Win32;
 using WchHexConverter;
+using static WCHIAPToolCLI.NativeMethods;
 
 namespace WCHIAPToolCLI;
+
+// ============================================================================
+// Native Interop
+// ============================================================================
+static class NativeMethods
+{
+    // CH375 (RevA)
+    [DllImport("CH375DLL64.dll", EntryPoint = "CH375OpenDevice", SetLastError = true)]
+    public static extern IntPtr CH375OpenDevice(uint iIndex);
+    [DllImport("CH375DLL64.dll", EntryPoint = "CH375CloseDevice", SetLastError = true)]
+    public static extern void CH375CloseDevice(uint iIndex);
+    [DllImport("CH375DLL64.dll", EntryPoint = "CH375ReadData", SetLastError = true)]
+    public static extern bool CH375ReadData(uint iIndex, IntPtr oBuffer, ref uint ioLength);
+    [DllImport("CH375DLL64.dll", EntryPoint = "CH375WriteData", SetLastError = true)]
+    public static extern bool CH375WriteData(uint iIndex, IntPtr iBuffer, ref uint ioLength);
+
+    // SetupAPI
+    public static readonly Guid GUID_DEVINTERFACE_USB_DEVICE =
+        new(0xA5DCBF10, 0x6530, 0x11D2, 0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED);
+    public const uint DIGCF_PRESENT = 0x00000002;
+    public const uint DIGCF_ALLCLASSES = 0x00000004;
+    public const uint SPDRP_HARDWAREID = 0x00000001;
+    public const uint SPDRP_SERVICE = 0x00000004;
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern IntPtr SetupDiGetClassDevs(ref Guid ClassGuid, string? Enumerator, IntPtr hwndParent, uint Flags);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern bool SetupDiEnumDeviceInfo(IntPtr DeviceInfoSet, uint MemberIndex, ref SP_DEVINFO_DATA DeviceInfoData);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern bool SetupDiGetDeviceRegistryProperty(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, uint Property, ref uint PropertyRegDataType, IntPtr PropertyBuffer, uint PropertyBufferSize, ref uint RequiredSize);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    public static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern bool SetupDiEnumDeviceInterfaces(IntPtr DeviceInfoSet, IntPtr DeviceInfoData, ref Guid InterfaceClassGuid, uint MemberIndex, ref SP_DEVICE_INTERFACE_DATA DeviceInterfaceData);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr DeviceInfoSet, ref SP_DEVICE_INTERFACE_DATA DeviceInterfaceData, IntPtr DeviceInterfaceDetailData, uint DeviceInterfaceDetailDataSize, ref uint RequiredSize, ref SP_DEVINFO_DATA DeviceInfoData);
+
+    // Kernel32
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern IntPtr CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    // WinUSB
+    [DllImport("winusb.dll", SetLastError = true)]
+    public static extern bool WinUsb_Initialize(IntPtr DeviceHandle, out IntPtr InterfaceHandle);
+    [DllImport("winusb.dll", SetLastError = true)]
+    public static extern bool WinUsb_Free(IntPtr InterfaceHandle);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern bool SetupDiGetDeviceInstanceId(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, IntPtr DeviceInstanceId, uint DeviceInstanceIdSize, ref uint RequiredSize);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    public static extern bool SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern bool SetupDiOpenDeviceInfo(IntPtr DeviceInfoSet, string DeviceInstanceId, IntPtr hwndParent, uint OpenFlags, ref SP_DEVINFO_DATA DeviceInfoData);
+
+    public static readonly Guid GUID_DEVINTERFACE_WINUSB =
+        new(0xA5DCBF10, 0x6530, 0x11D2, 0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED);
+    [DllImport("winusb.dll", SetLastError = true)]
+    public static extern bool WinUsb_WritePipe(IntPtr InterfaceHandle, byte PipeID, byte[] Buffer, uint BufferLength, out uint LengthTransferred, IntPtr Overlapped);
+    [DllImport("winusb.dll", SetLastError = true)]
+    public static extern bool WinUsb_ReadPipe(IntPtr InterfaceHandle, byte PipeID, byte[] Buffer, uint BufferLength, out uint LengthTransferred, IntPtr Overlapped);
+}
+
+[StructLayout(LayoutKind.Sequential)]
+struct SP_DEVINFO_DATA
+{
+    public uint cbSize;
+    public Guid ClassGuid;
+    public uint DevInst;
+    public IntPtr Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+struct SP_DEVICE_INTERFACE_DATA
+{
+    public int cbSize;
+    public Guid InterfaceClassGuid;
+    public int Flags;
+    public IntPtr Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+struct SP_DEVICE_INTERFACE_DETAIL_DATA
+{
+    public int cbSize;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+    public string DevicePath;
+}
 
 // ============================================================================
 // Exit Codes
@@ -27,6 +122,16 @@ enum ExitCode
 }
 
 // ============================================================================
+// USB Backend Mode
+// ============================================================================
+enum BackendMode
+{
+    Auto = 0,
+    Ch375 = 1,
+    WinUsb = 2,
+}
+
+// ============================================================================
 // CLI Args
 // ============================================================================
 class CliArgs
@@ -41,6 +146,7 @@ class CliArgs
     public bool Debug { get; set; }
     public bool InfoOnly { get; set; }
     public bool SkipVerify { get; set; }
+    public BackendMode Backend { get; set; } = BackendMode.Auto;
     public bool SkipProg { get; set; }
     public int TimeoutMs { get; set; } = 90000;
     public bool ShowHelp { get; set; }
@@ -80,12 +186,75 @@ class TimingEntry
     public long TotalMs { get; set; }
 }
 
+// ============================================================================
+// USB Backend Types
+// ============================================================================
+enum DeviceBackend { Unknown, Ch375, WinUsb }
+
+abstract class IapUsbDevice : IDisposable
+{
+    public UsbDeviceEntry Info { get; protected set; } = new();
+    public string DevicePath { get; protected set; } = "";
+    protected IapUsbDevice(UsbDeviceEntry info) { Info = info; }
+    public abstract bool Open();
+    public abstract bool WritePipe(byte[] buf, ref uint len);
+    public abstract bool ReadPipe(byte[] buf, ref uint len);
+    public abstract void Dispose();
+}
+
+class Ch375UsbDevice : IapUsbDevice
+{
+    private uint _index;
+    public Ch375UsbDevice(UsbDeviceEntry info) : base(info) { _index = info.Index; }
+    public override bool Open() { Info.Handle = CH375OpenDevice(_index); return Info.Handle != IntPtr.Zero; }
+    public override bool WritePipe(byte[] buf, ref uint len)
+    {
+        IntPtr ptr = Marshal.AllocHGlobal((int)len);
+        try { Marshal.Copy(buf, 0, ptr, (int)len); return CH375WriteData(_index, ptr, ref len); }
+        finally { Marshal.FreeHGlobal(ptr); }
+    }
+    public override bool ReadPipe(byte[] buf, ref uint len)
+    {
+        IntPtr ptr = Marshal.AllocHGlobal((int)len);
+        try { bool ok = CH375ReadData(_index, ptr, ref len); Marshal.Copy(ptr, buf, 0, (int)len); return ok; }
+        finally { Marshal.FreeHGlobal(ptr); }
+    }
+    public override void Dispose() { CH375CloseDevice(_index); }
+}
+
+class WinUsbDevice : IapUsbDevice
+{
+    private IntPtr _winUsbHandle = IntPtr.Zero;
+    private IntPtr _fileHandle = IntPtr.Zero;
+    public WinUsbDevice(UsbDeviceEntry info) : base(info) { }
+    public override bool Open()
+    {
+        uint GENERIC_RW = 0x80000000 | 0x40000000;
+        uint FILE_SHARE_RW = 0x00000001 | 0x00000002;
+        _fileHandle = CreateFile(Info.Name, GENERIC_RW, FILE_SHARE_RW, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero);
+        if (_fileHandle == new IntPtr(-1)) { _fileHandle = IntPtr.Zero; return false; }
+        if (!WinUsb_Initialize(_fileHandle, out _winUsbHandle)) { CloseHandle(_fileHandle); _fileHandle = IntPtr.Zero; return false; }
+        Info.Handle = _winUsbHandle;
+        return true;
+    }
+    public override bool WritePipe(byte[] buf, ref uint len) => WinUsb_WritePipe(_winUsbHandle, 0x02, buf, len, out uint w, IntPtr.Zero) && w == len;
+    public override bool ReadPipe(byte[] buf, ref uint len) => WinUsb_ReadPipe(_winUsbHandle, 0x82, buf, len, out len, IntPtr.Zero);
+    public override void Dispose()
+    {
+        if (_winUsbHandle != IntPtr.Zero) { WinUsb_Free(_winUsbHandle); _winUsbHandle = IntPtr.Zero; }
+        if (_fileHandle != IntPtr.Zero) { CloseHandle(_fileHandle); _fileHandle = IntPtr.Zero; }
+    }
+}
+
 class UsbDeviceEntry
 {
     public uint Index { get; set; }
     public ushort VendorId { get; set; }
     public ushort ProductId { get; set; }
     public string Name { get; set; } = "";
+    public string Service { get; set; } = "";
+    public DeviceBackend Backend { get; set; }
+    public IntPtr Handle { get; set; }
     public string VidPidString => $"VID=0x{VendorId:X4}, PID=0x{ProductId:X4}";
 }
 
@@ -94,28 +263,6 @@ class UsbDeviceEntry
 // ============================================================================
 class Program
 {
-    // --- CH375 DLL Imports --------------------------------------------------
-    [DllImport("CH375DLL64.dll", EntryPoint = "CH375OpenDevice", SetLastError = true)]
-    public static extern IntPtr CH375OpenDevice(uint iIndex);
-
-    [DllImport("CH375DLL64.dll", EntryPoint = "CH375CloseDevice", SetLastError = true)]
-    public static extern void CH375CloseDevice(uint iIndex);
-
-    [DllImport("CH375DLL64.dll", EntryPoint = "CH375GetVersion", SetLastError = true)]
-    public static extern uint CH375GetVersion();
-
-    [DllImport("CH375DLL64.dll", EntryPoint = "CH375GetUsbID", SetLastError = true)]
-    public static extern uint CH375GetUsbID(uint iIndex);
-
-    [DllImport("CH375DLL64.dll", EntryPoint = "CH375GetDeviceName", SetLastError = true)]
-    public static extern IntPtr CH375GetDeviceName(uint iIndex);
-
-    [DllImport("CH375DLL64.dll", EntryPoint = "CH375ReadData", SetLastError = true)]
-    public static extern bool CH375ReadData(uint iIndex, IntPtr oBuffer, ref uint ioLength);
-
-    [DllImport("CH375DLL64.dll", EntryPoint = "CH375WriteData", SetLastError = true)]
-    public static extern bool CH375WriteData(uint iIndex, IntPtr iBuffer, ref uint ioLength);
-
     // --- IAP Protocol Constants ---------------------------------------------
     private const byte CMD_IAP_PROM = 0x80;
     private const byte CMD_IAP_ERASE = 0x81;
@@ -132,7 +279,7 @@ class Program
 
     // --- State --------------------------------------------------------------
     private static CliArgs _args = new();
-    private static uint _selectedDeviceIndex;
+    private static IapUsbDevice? _device;
     private static UsbDeviceEntry? _selectedDevice;
     private static FirmwareFileEntry? _loadedFile;
     private static readonly Stopwatch _totalTimer = new();
@@ -244,6 +391,18 @@ class Program
                     a.SkipVerify = true;
                     break;
 
+                case "--ch375":
+                    a.Backend = BackendMode.Ch375;
+                    break;
+
+                case "--winusb":
+                    a.Backend = BackendMode.WinUsb;
+                    break;
+
+                case "--auto":
+                    a.Backend = BackendMode.Auto;
+                    break;
+
                 case "--skip_prog":
                     a.SkipProg = true;
                     break;
@@ -296,8 +455,6 @@ class Program
 
         // --- 1. Search devices ---
         LogMessage("1. Searching devices...", forceOutput: true);
-        uint version = CH375GetVersion();
-        LogDebug($"CH375 DLL Version: {version}");
 
         var devices = SearchDevices(_args.VidFilter, _args.PidFilter);
 
@@ -311,7 +468,7 @@ class Program
         LogMessage($"Found {devices.Count} matching device(s):", forceOutput: true);
         foreach (var d in devices)
         {
-            LogMessage($"  Device {d.Index}: {d.VidPidString}, {d.Name}", forceOutput: true);
+            LogMessage($"  Device {d.Index}: {d.VidPidString}, backend={d.Backend}", forceOutput: true);
         }
 
         // Select device
@@ -330,9 +487,14 @@ class Program
             _selectedDevice = devices[0];
         }
 
-        _selectedDeviceIndex = _selectedDevice.Index;
-        TraceLog($"SELECTED device index={_selectedDevice.Index} VID=0x{_selectedDevice.VendorId:X4} PID=0x{_selectedDevice.ProductId:X4}");
-        LogMessage($"Selected: Device {_selectedDevice.Index}, {_selectedDevice.VidPidString}",
+        // Resolve backend
+        var backend = _args.Backend == BackendMode.Auto
+            ? _selectedDevice.Backend
+            : (_args.Backend == BackendMode.WinUsb ? DeviceBackend.WinUsb : DeviceBackend.Ch375);
+        _selectedDevice.Backend = backend;
+
+        TraceLog($"SELECTED device index={_selectedDevice.Index} VID=0x{_selectedDevice.VendorId:X4} PID=0x{_selectedDevice.ProductId:X4} backend={backend}");
+        LogMessage($"Selected: Device {_selectedDevice.Index}, {_selectedDevice.VidPidString}, backend={backend}",
             forceOutput: true);
 
         // --info mode: just show device info and exit
@@ -400,16 +562,18 @@ class Program
         }
 
         // --- 3. Open device ---
-        LogMessage("3. Opening device...", forceOutput: true);
-        TraceLog($"OPENING device index={_selectedDeviceIndex}");
-        IntPtr handle = CH375OpenDevice(_selectedDeviceIndex);
-        TraceLog($"OPEN result handle=0x{handle.ToInt64():X8}");
-        if (handle == IntPtr.Zero)
+        LogMessage($"3. Opening device (backend={backend})...", forceOutput: true);
+        _device = backend == DeviceBackend.WinUsb
+            ? new WinUsbDevice(_selectedDevice)
+            : new Ch375UsbDevice(_selectedDevice);
+        TraceLog($"OPENING device backend={backend}");
+        if (!_device.Open())
         {
             TraceLog("OPEN FAILED");
-            OutputError(ExitCode.GeneralError, "Failed to open device");
+            OutputError(ExitCode.GeneralError, $"Failed to open device (backend={backend})");
             return ExitCode.GeneralError;
         }
+        TraceLog($"OPEN result handle=0x{_selectedDevice.Handle.ToInt64():X8}");
         LogMessage("   Device opened successfully");
 
         try
@@ -495,82 +659,115 @@ class Program
         finally
         {
             LogDebug("Closing device...");
-            try { CH375CloseDevice(_selectedDeviceIndex); } catch { /* ignore close errors */ }
+            try { _device?.Dispose(); } catch { /* ignore close errors */ }
             LogDebug("Device closed");
         }
     }
 
     // ========================================================================
-    // Device Search (with VID/PID filtering and device-name fallback)
+    // Device Search — VID/PID enumeration + Service-based backend detection
     // ========================================================================
+    static string? ReadDeviceProperty(IntPtr deviceInfoSet, ref SP_DEVINFO_DATA devInfo, uint property)
+    {
+        uint required = 0, regType = 0;
+        SetupDiGetDeviceRegistryProperty(deviceInfoSet, ref devInfo, property,
+            ref regType, IntPtr.Zero, 0, ref required);
+        if (required == 0) return null;
+        IntPtr buf = Marshal.AllocHGlobal((int)required);
+        try
+        {
+            if (SetupDiGetDeviceRegistryProperty(deviceInfoSet, ref devInfo, property,
+                ref regType, buf, required, ref required))
+                return Marshal.PtrToStringAuto(buf) ?? "";
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+        return null;
+    }
+
+    static (ushort vid, ushort pid) ParseVidPidFromHardwareIds(string? hwIds)
+    {
+        if (string.IsNullOrEmpty(hwIds)) return (0, 0);
+        var m = Regex.Match(hwIds, @"VID_([0-9a-fA-F]{4}).*PID_([0-9a-fA-F]{4})", RegexOptions.IgnoreCase);
+        if (m.Success)
+            return (Convert.ToUInt16(m.Groups[1].Value, 16), Convert.ToUInt16(m.Groups[2].Value, 16));
+        return (0, 0);
+    }
+
+    static DeviceBackend DetectBackend(string? service)
+    {
+        if (string.IsNullOrEmpty(service)) return DeviceBackend.Unknown;
+        if (service.Contains("WinUSB", StringComparison.OrdinalIgnoreCase)) return DeviceBackend.WinUsb;
+        if (service.Contains("CH375", StringComparison.OrdinalIgnoreCase)) return DeviceBackend.Ch375;
+        return DeviceBackend.Unknown;
+    }
+
     static List<UsbDeviceEntry> SearchDevices(ushort vidFilter, ushort pidFilter)
     {
         var devices = new List<UsbDeviceEntry>();
-        var invalidHandle = new IntPtr(-1);
+        var guid = GUID_DEVINTERFACE_USB_DEVICE;
+        uint DIGCF_DEVICEINTERFACE = 0x00000010;
+        IntPtr devInfoSet = SetupDiGetClassDevs(ref guid, null, IntPtr.Zero,
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (devInfoSet == new IntPtr(-1)) return devices;
 
-        for (uint i = 0; i < 16; i++)
+        try
         {
-            IntPtr searchHandle = IntPtr.Zero;
-            try
+            SP_DEVICE_INTERFACE_DATA devIfData = new();
+            devIfData.cbSize = Marshal.SizeOf(devIfData);
+            for (uint i = 0; SetupDiEnumDeviceInterfaces(devInfoSet, IntPtr.Zero, ref guid, i, ref devIfData); i++)
             {
-                searchHandle = CH375OpenDevice(i);
-                LogDebug($"CH375OpenDevice({i}) = 0x{searchHandle.ToInt64():X8}");
+                uint required = 0;
+                SP_DEVINFO_DATA dummyInfo = new();
+                dummyInfo.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+                SetupDiGetDeviceInterfaceDetail(devInfoSet, ref devIfData, IntPtr.Zero, 0, ref required, ref dummyInfo);
+                if (required == 0) continue;
+                LogDebug($"Device interface #{i}: required={required}");
 
-                if (searchHandle == IntPtr.Zero || searchHandle == invalidHandle)
-                    continue;
-
-                uint usbId = CH375GetUsbID(i);
-                ushort vendorId = (ushort)(usbId >> 16);
-                ushort productId = (ushort)(usbId & 0xFFFF);
-                IntPtr deviceNamePtr = CH375GetDeviceName(i);
-                string deviceName = Marshal.PtrToStringAnsi(deviceNamePtr) ?? "";
-
-                LogDebug($"Raw: VID=0x{vendorId:X4}, PID=0x{productId:X4}, Name={deviceName}");
-
-                // Fallback: parse VID/PID from device name.
-                // Device name is the authoritative source (raw USB path),
-                // because CH375GetUsbID may return swapped bytes on some DLL versions.
-                // Device name format: \\?\usb#vid_4348&pid_55e0#...
-                if (!string.IsNullOrEmpty(deviceName))
+                IntPtr detailBuf = Marshal.AllocHGlobal((int)required);
+                try
                 {
-                    var vidMatch = Regex.Match(deviceName,
-                        @"vid_([0-9a-fA-F]{4})", RegexOptions.IgnoreCase);
-                    var pidMatch = Regex.Match(deviceName,
-                        @"pid_([0-9a-fA-F]{4})", RegexOptions.IgnoreCase);
+                    // SP_DEVICE_INTERFACE_DETAIL_DATA: cbSize(DWORD) + DevicePath(TCHAR[])
+                    Marshal.WriteInt32(detailBuf, IntPtr.Size == 8 ? 8 : 6); // cbSize
+                    SP_DEVINFO_DATA devInfo = new() { cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>() };
+                    if (!SetupDiGetDeviceInterfaceDetail(devInfoSet, ref devIfData, detailBuf, required, ref required, ref devInfo))
+                        continue;
 
-                    if (vidMatch.Success && pidMatch.Success)
+                    string devPath = Marshal.PtrToStringAuto(detailBuf + 4) ?? "";
+
+                    // Read hardware ID and service from parent device
+                    string? hwIds = ReadDeviceProperty(devInfoSet, ref devInfo, SPDRP_HARDWAREID);
+                    string? service = ReadDeviceProperty(devInfoSet, ref devInfo, SPDRP_SERVICE);
+                    LogDebug($"   devPath={devPath}, hwIds={hwIds}, service={service}");
+
+                    var (vid, pid) = ParseVidPidFromHardwareIds(hwIds);
+                    if (vid == 0 && pid == 0)
                     {
-                        vendorId = Convert.ToUInt16(vidMatch.Groups[1].Value, 16);
-                        productId = Convert.ToUInt16(pidMatch.Groups[1].Value, 16);
-                        LogDebug($"Parsed from device name: VID=0x{vendorId:X4}, PID=0x{productId:X4}");
+                        // Fallback: parse from device path
+                        (vid, pid) = ParseVidPidFromHardwareIds(devPath);
                     }
+                    if (vid != vidFilter || pid != pidFilter) continue;
+
+                    var backend = DetectBackend(service);
+                    if (backend == DeviceBackend.Unknown)
+                    {
+                        LogMessage($"   Warning: Unknown driver service '{service ?? "(null)"}' for VID=0x{vid:X4} PID=0x{pid:X4}, defaulting to CH375", forceOutput: true);
+                        backend = DeviceBackend.Ch375;
+                    }
+
+                    devices.Add(new UsbDeviceEntry
+                    {
+                        Index = i,
+                        VendorId = vid,
+                        ProductId = pid,
+                        Name = devPath,
+                        Service = service ?? "",
+                        Backend = backend,
+                    });
                 }
-
-                if (vendorId == 0 && productId == 0)
-                    continue;
-                if (vendorId != vidFilter || productId != pidFilter)
-                    continue;
-                if (string.IsNullOrEmpty(deviceName))
-                    continue;
-
-                devices.Add(new UsbDeviceEntry
-                {
-                    Index = i,
-                    VendorId = vendorId,
-                    ProductId = productId,
-                    Name = deviceName,
-                });
-            }
-            catch (Exception ex)
-            {
-                LogDebug($"Error checking device {i}: {ex.Message}");
-            }
-            finally
-            {
-                if (searchHandle != IntPtr.Zero && searchHandle != invalidHandle)
-                    CH375CloseDevice(i);
+                finally { Marshal.FreeHGlobal(detailBuf); }
             }
         }
+        finally { SetupDiDestroyDeviceInfoList(devInfoSet); }
 
         LogDebug($"Search result: {devices.Count} device(s) matched");
         return devices;
@@ -601,43 +798,25 @@ class Program
         if (payload != null && payloadLen > 0)
             Array.Copy(payload, 0, cmdBuf, 2, Math.Min(payloadLen, MAX_DATA_PER_PACKET));
 
-        uint len = (uint)cmdBuf.Length;
-        IntPtr ptr = Marshal.AllocHGlobal((int)len);
-        try
+        uint len = (uint)USB_PACKET_SIZE;
+        TraceLog($"CMD WRITE cmd=0x{cmd:X2}");
+        if (!_device!.WritePipe(cmdBuf, ref len))
         {
-            Marshal.Copy(cmdBuf, 0, ptr, (int)len);
-            TraceLog($"CMD WRITE cmd=0x{cmd:X2}");
-            if (!CH375WriteData(_selectedDeviceIndex, ptr, ref len))
-            {
-                TraceLog("CMD WRITE FAILED");
-                return false;
-            }
-            TraceLog("CMD WRITE OK");
+            TraceLog("CMD WRITE FAILED");
+            return false;
         }
-        finally
-        {
-            Marshal.FreeHGlobal(ptr);
-        }
+        TraceLog("CMD WRITE OK");
 
         byte[] resp = new byte[USB_PACKET_SIZE];
         len = (uint)resp.Length;
-        ptr = Marshal.AllocHGlobal((int)len);
-        try
+        TraceLog("CMD READ start");
+        if (!_device.ReadPipe(resp, ref len))
         {
-            TraceLog("CMD READ start");
-            if (!CH375ReadData(_selectedDeviceIndex, ptr, ref len))
-            {
-                TraceLog("CMD READ FAILED");
-                return false;
-            }
-            TraceLog("CMD READ OK");
-            Marshal.Copy(ptr, resp, 0, (int)len);
-            return resp[0] == ERR_SUCCESS;
+            TraceLog("CMD READ FAILED");
+            return false;
         }
-        finally
-        {
-            Marshal.FreeHGlobal(ptr);
-        }
+        TraceLog("CMD READ OK");
+        return resp[0] == ERR_SUCCESS;
     }
 
     static bool SendProgramData(byte[] fileContent)
@@ -656,46 +835,28 @@ class Program
                 cmdBuf[1] = (byte)chunkSize;
                 Array.Copy(fileContent, offset, cmdBuf, 2, chunkSize);
 
-                uint len = (uint)cmdBuf.Length;
-                IntPtr ptr = Marshal.AllocHGlobal((int)len);
-                try
+                uint len = (uint)USB_PACKET_SIZE;
+                TraceLog($"PROG WRITE offset=0x{offset:X} size={chunkSize}");
+                if (!_device!.WritePipe(cmdBuf, ref len))
                 {
-                    Marshal.Copy(cmdBuf, 0, ptr, (int)len);
-                    TraceLog($"PROG WRITE offset=0x{offset:X} size={chunkSize}");
-                    if (!CH375WriteData(_selectedDeviceIndex, ptr, ref len))
-                    {
-                        TraceLog("PROG WRITE FAILED");
-                        return false;
-                    }
-                    TraceLog("PROG WRITE OK");
+                    TraceLog("PROG WRITE FAILED");
+                    return false;
                 }
-                finally
-                {
-                    Marshal.FreeHGlobal(ptr);
-                }
+                TraceLog("PROG WRITE OK");
 
-                len = (uint)USB_PACKET_SIZE;
-                ptr = Marshal.AllocHGlobal((int)len);
-                try
+                byte[] resp = new byte[USB_PACKET_SIZE];
+                len = (uint)resp.Length;
+                TraceLog("PROG READ start");
+                if (!_device.ReadPipe(resp, ref len))
                 {
-                    TraceLog("PROG READ start");
-                    if (!CH375ReadData(_selectedDeviceIndex, ptr, ref len))
-                    {
-                        TraceLog("PROG READ FAILED");
-                        return false;
-                    }
-                    TraceLog("PROG READ OK");
-                    byte[] resp = new byte[(int)len];
-                    Marshal.Copy(ptr, resp, 0, (int)len);
-                    if (resp[0] != ERR_SUCCESS)
-                    {
-                        LogDebug($"Program chunk at offset 0x{offset:X} failed: response 0x{resp[0]:X2}");
-                        return false;
-                    }
+                    TraceLog("PROG READ FAILED");
+                    return false;
                 }
-                finally
+                TraceLog("PROG READ OK");
+                if (resp[0] != ERR_SUCCESS)
                 {
-                    Marshal.FreeHGlobal(ptr);
+                    LogDebug($"Program chunk at offset 0x{offset:X} failed: response 0x{resp[0]:X2}");
+                    return false;
                 }
 
                 offset += chunkSize;
@@ -731,46 +892,28 @@ class Program
                 cmdBuf[1] = (byte)chunkSize;
                 Array.Copy(fileContent, offset, cmdBuf, 2, chunkSize);
 
-                uint len = (uint)cmdBuf.Length;
-                IntPtr ptr = Marshal.AllocHGlobal((int)len);
-                try
+                uint len = (uint)USB_PACKET_SIZE;
+                TraceLog($"VERIFY WRITE offset=0x{offset:X}");
+                if (!_device!.WritePipe(cmdBuf, ref len))
                 {
-                    Marshal.Copy(cmdBuf, 0, ptr, (int)len);
-                    TraceLog($"VERIFY WRITE offset=0x{offset:X}");
-                    if (!CH375WriteData(_selectedDeviceIndex, ptr, ref len))
-                    {
-                        TraceLog("VERIFY WRITE FAILED");
-                        return false;
-                    }
-                    TraceLog("VERIFY WRITE OK");
+                    TraceLog("VERIFY WRITE FAILED");
+                    return false;
                 }
-                finally
-                {
-                    Marshal.FreeHGlobal(ptr);
-                }
+                TraceLog("VERIFY WRITE OK");
 
-                len = (uint)USB_PACKET_SIZE;
-                ptr = Marshal.AllocHGlobal((int)len);
-                try
+                byte[] resp = new byte[USB_PACKET_SIZE];
+                len = (uint)resp.Length;
+                TraceLog("VERIFY READ start");
+                if (!_device.ReadPipe(resp, ref len))
                 {
-                    TraceLog("VERIFY READ start");
-                    if (!CH375ReadData(_selectedDeviceIndex, ptr, ref len))
-                    {
-                        TraceLog("VERIFY READ FAILED");
-                        return false;
-                    }
-                    TraceLog("VERIFY READ OK");
-                    byte[] resp = new byte[(int)len];
-                    Marshal.Copy(ptr, resp, 0, (int)len);
-                    if (resp[0] != ERR_SUCCESS)
-                    {
-                        LogDebug($"Verify mismatch at offset 0x{offset:X}: response 0x{resp[0]:X2}");
-                        return false;
-                    }
+                    TraceLog("VERIFY READ FAILED");
+                    return false;
                 }
-                finally
+                TraceLog("VERIFY READ OK");
+                if (resp[0] != ERR_SUCCESS)
                 {
-                    Marshal.FreeHGlobal(ptr);
+                    LogDebug($"Verify mismatch at offset 0x{offset:X}: response 0x{resp[0]:X2}");
+                    return false;
                 }
 
                 offset += chunkSize;
@@ -793,24 +936,15 @@ class Program
             cmdBuf[0] = CMD_IAP_END;
             cmdBuf[1] = 0x00;
 
-            uint len = (uint)cmdBuf.Length;
-            IntPtr ptr = Marshal.AllocHGlobal((int)len);
-            try
+            uint len = (uint)USB_PACKET_SIZE;
+            TraceLog("END WRITE");
+            if (!_device!.WritePipe(cmdBuf, ref len))
             {
-                Marshal.Copy(cmdBuf, 0, ptr, (int)len);
-                TraceLog("END WRITE");
-                if (!CH375WriteData(_selectedDeviceIndex, ptr, ref len))
-                {
-                    LogDebug("SendEndCommand: write failed");
-                    TraceLog("END WRITE FAILED");
-                    return;
-                }
-                TraceLog("END WRITE OK");
+                LogDebug("SendEndCommand: write failed");
+                TraceLog("END WRITE FAILED");
+                return;
             }
-            finally
-            {
-                Marshal.FreeHGlobal(ptr);
-            }
+            TraceLog("END WRITE OK");
 
             TraceLog("END sent, device resets");
             LogDebug("End command sent, device will reset to application");
