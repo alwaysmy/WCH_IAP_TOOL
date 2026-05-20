@@ -18,7 +18,7 @@
 |---|------|------|------|
 | 1 | `--info --debug` | ✅ | 枚举到设备, service=WINUSB, backend=WinUsb |
 | 2 | `--skip_prog --debug` | ✅ | 打开设备 → 发 END → 设备复位, 47ms |
-| 3 | (待测) 完整 IAP | - | ERASE→PROGRAM→VERIFY→END |
+| 3 | `-f CH32V30x_IAP.hex --no-wait` | ✅ | ERASE(1ms)→PROGRAM(691ms,6840B)→VERIFY(202ms)→END, total 954ms |
 
 ---
 
