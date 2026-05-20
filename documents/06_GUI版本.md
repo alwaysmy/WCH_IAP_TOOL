@@ -3,10 +3,11 @@
 ## 1. 功能概述
 
 GUI版本提供图形界面的IAP下载工具，具有以下特点：
-- 自动检测USB设备
-- 支持文件拖放
+- **WinUSB + CH375 双后端**：自动检测驱动类型，兼容 RevA/RevB 固件
+- 自动检测USB设备（SetupDi 枚举 + Service 注册表判定）
+- 支持文件拖放、HEX/BIN 自动转换
 - 实时日志显示
-- 设备状态指示
+- **异步下载**：不阻塞界面
 
 ## 2. 界面布局
 
@@ -86,7 +87,17 @@ GUI版本提供图形界面的IAP下载工具，具有以下特点：
 
 ## 5. 自动设备检测
 
-### 5.1 检测机制
+### 5.1 WinUSB + CH375 双后端
+
+GUI 通过共享文件 `UsbBackend.cs` 实现双后端抽象：
+
+- `IapUsbDevice` 抽象类：`Open()` / `WritePipe()` / `ReadPipe()` / `Dispose()` + `SendCmd()` / `SendData()` / `SendEnd()`
+- `Ch375UsbDevice`：CH375DLL64.dll 后端（RevA 兼容）
+- `WinUsbDevice`：WinUSB API 后端（RevB）
+
+**默认 `--auto` 模式**：通过 SetupDi 读 Service 注册表值判定后端（`WINUSB` → WinUSB, `CH375*` → CH375）。下拉框显示 `[WinUsb]` / `[Ch375]` 标签。
+
+### 5.2 检测机制
 
 GUI 版本采用**三层检测**策略确保设备插拔及时响应：
 
@@ -156,18 +167,14 @@ protected override void WndProc(ref Message m)
 
 ### 6.1 流程步骤
 
+**异步执行**：`DownloadButton_Click` → `async void`, `await Task.Run(DownloadProgram)` 后台线程下载。`LogMessage` 通过 `InvokeRequired` + `BeginInvoke` 线程安全写 UI。下载前暂停轮询定时器防竞态。
+
 ```
-1. 检查文件是否存在
-2. 检查设备是否选择
-3. 读取文件内容
-   ├─ .bin文件：直接读取
-   └─ .hex文件：转换为BIN
-4. 打开设备
-5. 发送擦除命令
-6. 发送程序数据（分块）
-7. 发送校验命令
-8. 发送结束命令
-9. 完成
+1. 提取 UI 参数（文件路径、选定设备）→ 副本
+2. Task.Run(DownloadProgram) 后台线程
+3. HEX→BIN 转换 → DeviceSearch 获取后端 → IapUsbDevice.Open
+4. SendCmd(ERASE) → SendData(PROM) → SendData(VERIFY) → SendEnd
+5. finally: 恢复定时器 + 启用按钮
 ```
 
 ### 6.2 日志输出示例
@@ -195,19 +202,17 @@ protected override void WndProc(ref Message m)
 
 ### 7.1 主要方法
 
-| 方法 | 说明 |
+| 方法 / 类型 | 说明 |
 |------|------|
+| `IapUsbDevice` (UsbBackend.cs) | USB 后端抽象基类，`SendCmd/SendData/SendEnd` |
+| `Ch375UsbDevice` / `WinUsbDevice` | CH375 / WinUSB 具体实现 |
+| `DeviceSearch.SearchDevices()` | SetupDi 枚举 + Service 判定 |
 | `InitializeUI()` | 初始化界面 |
-| `CreateDeviceSection()` | 创建设备管理区 |
-| `CreateDownloadSection()` | 创建下载区 |
-| `CreateLogSection()` | 创建日志区 |
-| `StartDevicePolling()` | 启动设备轮询 |
-| `WndProc()` | 处理 Windows 消息 |
-| `SearchDevices()` | 搜索设备 |
-| `UpdateDownloadButtonState()` | 更新按钮状态 |
-| `DownloadProgram()` | 执行下载 |
-| `LogMessage()` | 输出日志 |
-| `LogDebug()` | 调试日志（--debug 模式） |
+| `StartDevicePolling()` | 设备轮询（下载时暂停） |
+| `SearchDevices()` | GUI 设备搜索（调用 DeviceSearch） |
+| `DownloadProgram(string, UsbDeviceEntry)` | 后台下载（参数传入，不碰 UI） |
+| `DownloadButton_Click()` | async void 入口，提取参数 + Task.Run |
+| `LogMessage()` / `LogDebug()` | InvokeRequired 线程安全写日志 |
 
 ### 7.2 控件命名
 

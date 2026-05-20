@@ -187,15 +187,15 @@ CH375 驱动 (`CH375DLL64.dll`) 在传输大文件（>~16KB）时，`CH375ReadDa
 | 3 | BIN 直接下载 | ✅ | CH32V30x_USB_AD7175 |
 | 4 | 完整下载流程 | ✅ WinUSB 可用 | CH32V30x_USB_AD7175 |
 
-### 已知问题：GUI 下载时界面阻塞
+### 已知问题：GUI 下载时界面阻塞 [已修复]
 
-下载在主线程执行，大文件时界面卡死。改善方案：`async/await` + `Task.Run` 把下载移到后台线程，`LogMessage` 用 `BeginInvoke` 切回 UI 线程更新日志。
+**修复**: `DownloadButton_Click` → `async void`, 下载逻辑 `await Task.Run(DownloadProgram)`。`LogMessage`/`LogDebug` 加 `InvokeRequired` + `BeginInvoke` 线程安全。下载前暂停定时器轮询防竞态。
 
 ## 七、待办
 
 - [x] 完整 IAP 烧录测试 — WinUSB/CH375 均验证
 - [x] GUI 同步改为 IapUsbDevice 接口 (WinUSB + CH375 双后端)
-- [ ] GUI 下载异步化（防界面卡死）
+- [x] GUI 下载异步化（防界面卡死）
 - [ ] GUI 加 --ch375/--winusb/--auto 命令行参数
 - [ ] --help 文本更新
 - [ ] 删除临时 debug 日志行
