@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 using System.IO;
+using WCHIAP.Backend;
 using WchHexConverter;
 
 namespace WCHIAPToolNew
@@ -43,6 +44,8 @@ namespace WCHIAPToolNew
 
         private List<DeviceInfo> devices = new List<DeviceInfo>();
         private uint selectedDeviceIndex = 0;
+        private IapUsbDevice? _device;
+        private BackendMode _backendMode = BackendMode.Auto;
         private System.Windows.Forms.Timer? _pollTimer;
         private int _lastDeviceCount = 0;
 
@@ -95,15 +98,8 @@ namespace WCHIAPToolNew
             _pollTimer.Interval = 2000;
             _pollTimer.Tick += (s, e) =>
             {
-                int currentCount = 0;
-                for (uint i = 0; i < 16; i++)
-                {
-                    IntPtr h = CH375OpenDevice(i);
-                    bool valid = h != IntPtr.Zero && h.ToInt32() != -1;
-                    if (h != IntPtr.Zero && h.ToInt32() != -1)
-                        CH375CloseDevice(i);
-                    if (valid) currentCount++;
-                }
+                var tmp = DeviceSearch.SearchDevices(0x4348, 0x55E0);
+                int currentCount = tmp.Count;
 
                 if (currentCount != _lastDeviceCount)
                 {
@@ -424,57 +420,15 @@ namespace WCHIAPToolNew
 
             try
             {
-                int foundCount = 0;
-                for (uint i = 0; i < 16; i++)
+                devices.Clear();
+                var usbDevs = DeviceSearch.SearchDevices(0x4348, 0x55E0, msg => LogDebug(msg));
+                foreach (var d in usbDevs)
                 {
-                    IntPtr handle = CH375OpenDevice(i);
-                    LogDebug($"CH375OpenDevice({i}) = 0x{handle.ToInt64():X8}");
-                    if (handle != IntPtr.Zero && handle.ToInt32() != -1)
-                    {
-                        uint usbId = CH375GetUsbID(i);
-                        ushort vendorId = (ushort)(usbId >> 16);
-                        ushort productId = (ushort)(usbId & 0xFFFF);
-                        IntPtr deviceNamePtr = CH375GetDeviceName(i);
-                        string deviceName = Marshal.PtrToStringAnsi(deviceNamePtr);
-
-                        // 备选方案：从设备名称中解析VID/PID。
-                        // 设备名称是权威来源（原始USB路径），因为某些DLL版本中
-                        // CH375GetUsbID可能返回字节交换的错误值（如0x55E04348而非0x434855E0）。
-                        // 始终使用设备名称解析，覆盖CH375GetUsbID的结果。
-                        // 设备名称格式：\\?\usb#vid_4348&pid_55e0#...
-                        if (!string.IsNullOrEmpty(deviceName))
-                        {
-                            var vidMatch = System.Text.RegularExpressions.Regex.Match(deviceName, @"vid_([0-9a-fA-F]{4})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                            var pidMatch = System.Text.RegularExpressions.Regex.Match(deviceName, @"pid_([0-9a-fA-F]{4})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-                            if (vidMatch.Success && pidMatch.Success)
-                            {
-                                vendorId = Convert.ToUInt16(vidMatch.Groups[1].Value, 16);
-                                productId = Convert.ToUInt16(pidMatch.Groups[1].Value, 16);
-                                LogDebug($"从设备名称解析: VID=0x{vendorId:X4}, PID=0x{productId:X4}");
-                            }
-                        }
-
-                        LogDebug($"设备{i}: VID=0x{vendorId:X4}, PID=0x{productId:X4}, Name={deviceName ?? "null"}");
-
-                        if (vendorId != 0 && productId != 0 && !string.IsNullOrEmpty(deviceName))
-                        {
-                            DeviceInfo device = new DeviceInfo
-                            {
-                                Index = i,
-                                VendorId = vendorId,
-                                ProductId = productId,
-                                Name = deviceName
-                            };
-
-                            devices.Add(device);
-                            foundCount++;
-                            deviceComboBox.Items.Add($"设备 {i}");
-                            deviceComboBox.Enabled = true;
-                        }
-                    }
+                    devices.Add(new DeviceInfo { Index = d.Index, VendorId = d.VendorId, ProductId = d.ProductId, Name = d.Name });
+                    deviceComboBox.Items.Add($"设备 {d.Index} [{d.Backend}]");
                 }
-
+                int foundCount = devices.Count;
+                LogDebug($"DeviceSearch found: {foundCount}");
                 LogDebug($"共找到 {foundCount} 个有效设备");
 
                 if (deviceComboBox.Items.Count > 0)
@@ -564,36 +518,20 @@ namespace WCHIAPToolNew
                     LogMessage($"文件大小: {fileContent.Length} 字节");
                 }
 
-                IntPtr handle = CH375OpenDevice(selectedDeviceIndex);
-                if (handle == IntPtr.Zero)
-                {
-                    LogMessage("无法打开设备");
-                    return;
-                }
+                // Re-search to get full device info (backend + path)
+                var usbList = DeviceSearch.SearchDevices(0x4348, 0x55E0);
+                var devEntry = usbList.Count > 0 ? usbList[0] : new UsbDeviceEntry { Name = "" };
+                var backend = _backendMode == BackendMode.Auto ? devEntry.Backend
+                    : (_backendMode == BackendMode.WinUsb ? DeviceBackend.WinUsb : DeviceBackend.Ch375);
+                LogMessage($"后端: {backend}");
 
-                LogMessage("发送擦除命令...");
-                if (!SendEraseCommand())
-                {
-                    LogMessage("擦除命令失败");
-                    return;
-                }
+                _device = backend == DeviceBackend.WinUsb ? new WinUsbDevice(devEntry) : new Ch375UsbDevice(devEntry);
+                if (!_device.Open()) { LogMessage("无法打开设备"); return; }
 
-                LogMessage("发送程序数据...");
-                if (!SendProgramData(fileContent))
-                {
-                    LogMessage("发送程序数据失败");
-                    return;
-                }
-
-                LogMessage("发送验证命令...");
-                if (!SendVerifyCommand(fileContent))
-                {
-                    LogMessage("验证失败");
-                    return;
-                }
-
-                LogMessage("发送结束命令...");
-                SendEndCommand();
+                if (!_device.SendCmd(CMD_IAP_ERASE)) { LogMessage("擦除失败"); return; }
+                if (!_device.SendData(CMD_IAP_PROM, fileContent)) { LogMessage("编程失败"); return; }
+                if (!_device.SendData(CMD_IAP_VERIFY, fileContent)) { LogMessage("验证失败"); return; }
+                _device.SendEnd();
 
                 LogMessage("下载完成");
             }

@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <Compile Include="..\WchHexToBinConverter.cs" Link="WchHexToBinConverter.cs" />
+    <Compile Include="..\UsbBackend.cs" Link="UsbBackend.cs" />
   </ItemGroup>
 
 </Project>
