@@ -92,6 +92,10 @@ namespace WchHexConverter
                             maxAddress = address + (uint)dataLen;
                         break;
 
+                    case 0x02: // Extended segment address record
+                        baseAddress = (uint)((data[4] << 8) | data[5]) << 4;
+                        break;
+
                     case 0x04: // Extended linear address record
                         // WCH: Used for addresses above 64KB (e.g., 0x08010000)
                         baseAddress = (uint)((data[4] << 8) | data[5]) << 16;

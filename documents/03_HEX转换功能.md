@@ -60,7 +60,8 @@ namespace WchHexConverter
 1. 读取HEX文件所有行
 2. 遍历每行，解析记录类型
    ├─ 0x00 (Data): 收集数据段，记录地址范围
-   ├─ 0x04 (ExtLinAddr): 更新基地址
+   ├─ 0x02 (ExtSegAddr): 更新段基地址（shift << 4）
+   ├─ 0x04 (ExtLinAddr): 更新线性基地址（shift << 16）
    ├─ 0x03 (StartSegAddr): 忽略（WCH RISC-V不需要）
    ├─ 0x05 (StartLinAddr): 忽略
    └─ 0x01 (EOF): 结束解析
@@ -102,6 +103,10 @@ public static HexFileResult ConvertHexToBin(string hexFilePath)
 
                 if (address < minAddress) minAddress = address;
                 if (address + (uint)dataLen > maxAddress) maxAddress = address + (uint)dataLen;
+                break;
+
+            case 0x02: // Extended segment address
+                baseAddress = (uint)((data[4] << 8) | data[5]) << 4;
                 break;
 
             case 0x04: // Extended linear address
@@ -213,25 +218,22 @@ Console.WriteLine($"起始地址: 0x{startAddress:X8}");
 
 ### 6.1 测试用例
 
-使用 `CH32V30x_ft2232h_XilinxCable.hex` 测试：
+使用 `CH32V30x_USB_AD7175.hex`（含 type 0x02 Extended Segment Address 记录）测试：
 
 ```
 转换成功!
-  数据大小: 24684 字节
+  数据大小: 96364 字节 (94.1 KB)
   起始地址: 0x00005000
-  结束地址: 0x0000B06C
+  结束地址: 0x0001C86C
 ```
 
-### 6.2 与官方对比
+### 6.2 与 obj 目录 BIN 对比
 
 ```
-对比BIN文件:
-  文件1: CH32V30x_ft2232h_XilinxCable_cankao.bin (官方)
-  文件2: CH32V30x_ft2232h_XilinxCable.test.bin (本工具)
+--compare-bin obj\CH32V30x_USB_AD7175.bin obj\CH32V30x_USB_AD7175.test.bin
 
-文件1大小: 24684 字节
-文件2大小: 24684 字节
-
+文件1大小: 96364 字节
+文件2大小: 96364 字节
 文件完全相同!
 ```
 
