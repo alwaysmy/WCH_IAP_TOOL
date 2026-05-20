@@ -404,9 +404,34 @@ namespace WCHIAPToolNew
             }
         }
 
-        private void DownloadButton_Click(object sender, EventArgs e)
+        private async void DownloadButton_Click(object sender, EventArgs e)
         {
-            DownloadProgram();
+            var btn = sender as Button;
+            if (btn != null) btn.Enabled = false;
+
+            // Capture UI state before background thread
+            ComboBox filePathComboBox = this.Controls.Find("filePathComboBox", true).FirstOrDefault() as ComboBox;
+            ComboBox deviceComboBox = this.Controls.Find("deviceComboBox", true).FirstOrDefault() as ComboBox;
+            if (filePathComboBox == null || deviceComboBox == null) { LogMessage("控件未找到"); return; }
+            string filePath = filePathComboBox.Text;
+            if (string.IsNullOrEmpty(filePath)) { LogMessage("请选择下载文件"); return; }
+            if (!File.Exists(filePath)) { LogMessage("文件不存在"); return; }
+            if (deviceComboBox.SelectedIndex < 0 || devices.Count == 0) { LogMessage("请选择设备"); return; }
+
+            var dev = devices[deviceComboBox.SelectedIndex];
+            var devEntry = new UsbDeviceEntry { Index = dev.Index, VendorId = dev.VendorId, ProductId = dev.ProductId, Name = dev.Name };
+
+            // Stop polling timer to prevent race
+            _pollTimer?.Stop();
+
+            try { await Task.Run(() => DownloadProgram(filePath, devEntry)); }
+            catch (Exception ex) { LogMessage($"下载异常: {ex.Message}"); }
+            finally
+            {
+                _pollTimer?.Start();
+                if (btn != null) btn.Enabled = true;
+                UpdateDownloadButtonState();
+            }
         }
 
         private void SearchDevices()
@@ -453,79 +478,29 @@ namespace WCHIAPToolNew
             UpdateDownloadButtonState();
         }
 
-        private void DownloadProgram()
+        private void DownloadProgram(string filePath, UsbDeviceEntry devEntry)
         {
-            ComboBox filePathComboBox = this.Controls.Find("filePathComboBox", true).FirstOrDefault() as ComboBox;
-            ComboBox deviceComboBox = this.Controls.Find("deviceComboBox", true).FirstOrDefault() as ComboBox;
-
-            if (filePathComboBox == null || deviceComboBox == null)
-            {
-                LogMessage("控件未找到");
-                return;
-            }
-
-            string filePath = filePathComboBox.Text;
-
-            if (string.IsNullOrEmpty(filePath))
-            {
-                LogMessage("请选择下载文件");
-                return;
-            }
-
-            if (!File.Exists(filePath))
-            {
-                LogMessage("文件不存在");
-                return;
-            }
-
-            if (deviceComboBox.SelectedIndex < 0 || devices.Count == 0)
-            {
-                LogMessage("请选择设备");
-                return;
-            }
-
             try
             {
-                selectedDeviceIndex = (uint)deviceComboBox.SelectedIndex;
-
-                LogMessage($"开始下载程序...");
-                LogMessage($"文件路径: {filePath}");
-                
-                // 保存到历史记录
+                LogMessage($"开始下载: {Path.GetFileName(filePath)}");
                 SaveFileHistory(filePath);
-                
-                if (selectedDeviceIndex < devices.Count)
-                {
-                    var device = devices[(int)selectedDeviceIndex];
-                    LogMessage($"选择的设备: 设备 {device.Index}, VID={device.VendorId:X4}, PID={device.ProductId:X4}");
-                }
 
                 byte[] fileContent;
                 if (filePath.EndsWith(".hex", StringComparison.OrdinalIgnoreCase))
                 {
-                    LogMessage("检测到HEX文件，正在转换...");
-                    var hexResult = WchHexToBinConverter.ConvertHexToBin(filePath);
-                    fileContent = hexResult.Data;
-                    LogMessage($"HEX转换完成，BIN大小: {fileContent.Length} 字节");
-                    if (hexResult.StartAddress > 0)
-                    {
-                        LogMessage($"起始地址: 0x{hexResult.StartAddress:X8}");
-                    }
+                    fileContent = WchHexToBinConverter.ConvertHexToBin(filePath).Data;
                 }
-                else
-                {
-                    fileContent = File.ReadAllBytes(filePath);
-                    LogMessage($"文件大小: {fileContent.Length} 字节");
-                }
+                else fileContent = File.ReadAllBytes(filePath);
+                LogMessage($"文件 {fileContent.Length} 字节");
 
-                // Re-search to get full device info (backend + path)
+                // Re-search for full device info (backend + WinUSB path)
                 var usbList = DeviceSearch.SearchDevices(0x4348, 0x55E0);
-                var devEntry = usbList.Count > 0 ? usbList[0] : new UsbDeviceEntry { Name = "" };
-                var backend = _backendMode == BackendMode.Auto ? devEntry.Backend
+                var entry = usbList.Count > 0 ? usbList[0] : devEntry;
+                var backend = _backendMode == BackendMode.Auto ? entry.Backend
                     : (_backendMode == BackendMode.WinUsb ? DeviceBackend.WinUsb : DeviceBackend.Ch375);
                 LogMessage($"后端: {backend}");
 
-                _device = backend == DeviceBackend.WinUsb ? new WinUsbDevice(devEntry) : new Ch375UsbDevice(devEntry);
+                _device = backend == DeviceBackend.WinUsb ? new WinUsbDevice(entry) : new Ch375UsbDevice(entry);
                 if (!_device.Open()) { LogMessage("无法打开设备"); return; }
 
                 if (!_device.SendCmd(CMD_IAP_ERASE)) { LogMessage("擦除失败"); return; }
@@ -535,10 +510,7 @@ namespace WCHIAPToolNew
 
                 LogMessage("下载完成");
             }
-            catch (Exception ex)
-            {
-                LogMessage($"下载时出错: {ex.Message}");
-            }
+            catch (Exception ex) { LogMessage($"下载出错: {ex.Message}"); }
         }
 
         private bool SendEraseCommand()
@@ -723,6 +695,11 @@ namespace WCHIAPToolNew
 
         private void LogMessage(string message)
         {
+            if (this.InvokeRequired)
+            {
+                this.BeginInvoke(() => LogMessage(message));
+                return;
+            }
             TextBox logTextBox = this.Controls.Find("logTextBox", true).FirstOrDefault() as TextBox;
             if (logTextBox != null)
             {

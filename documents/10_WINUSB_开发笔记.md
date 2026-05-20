@@ -178,9 +178,24 @@ CH375 驱动 (`CH375DLL64.dll`) 在传输大文件（>~16KB）时，`CH375ReadDa
 
 **兼容策略**：CH375 后端保留（`--ch375` 参数），小文件可用。`--auto` 默认走 WinUSB。以后逆向 DLL 排查或直接废弃。
 
-## 六、待办
+## 六、GUI 测试记录
 
-- [x] 完整 IAP 烧录测试 (ERASE→PROGRAM→VERIFY→END) — WinUSB 通过
-- [ ] GUI (Form1.cs) 同步改为 IapUsbDevice 接口
+| # | 测试 | 结果 | 固件 |
+|---|------|------|------|
+| 1 | 设备搜索 + 下拉框 | ✅ 显示 [WinUsb] | RevB IAP |
+| 2 | HEX 转 BIN (AD7175) | ✅ 96364B, 与 obj BIN 一致 | CH32V30x_USB_AD7175 |
+| 3 | BIN 直接下载 | ✅ | CH32V30x_USB_AD7175 |
+| 4 | 完整下载流程 | ✅ WinUSB 可用 | CH32V30x_USB_AD7175 |
+
+### 已知问题：GUI 下载时界面阻塞
+
+下载在主线程执行，大文件时界面卡死。改善方案：`async/await` + `Task.Run` 把下载移到后台线程，`LogMessage` 用 `BeginInvoke` 切回 UI 线程更新日志。
+
+## 七、待办
+
+- [x] 完整 IAP 烧录测试 — WinUSB/CH375 均验证
+- [x] GUI 同步改为 IapUsbDevice 接口 (WinUSB + CH375 双后端)
+- [ ] GUI 下载异步化（防界面卡死）
+- [ ] GUI 加 --ch375/--winusb/--auto 命令行参数
 - [ ] --help 文本更新
 - [ ] 删除临时 debug 日志行
